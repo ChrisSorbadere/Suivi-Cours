@@ -1,6 +1,6 @@
 const { useState, useEffect, useCallback } = React;
 
-const APP_VERSION = "v3.1";
+const APP_VERSION = "v3.2";
 
 // ── API Apps Script ───────────────────────────────────────────────────────────
 const API_URL = "https://script.google.com/macros/s/AKfycbxiOA_ZhZFg1FSWf7JEII1xUbJNutGek20sg17Vr5_sWwPsTj3AI1VKim803oo7BGYGPg/exec";
@@ -353,6 +353,7 @@ const sc = code => STUDENT_COLORS[code] || "#888";
 const globalCSS = `
   @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=DM+Sans:wght@300;400;500;600&display=swap');
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { overscroll-behavior-y: contain; }
   body { background: ${C.bg}; }
   @keyframes fadeUp { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:translateY(0); } }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -888,8 +889,28 @@ function App() {
 
   useEffect(() => { fetchData(); }, []);
 
+  // Navigation par swipe gauche/droite
+  const touchRef = React.useRef({ x:0, y:0 });
+  function onTouchStart(e) {
+    touchRef.current = { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
+  }
+  function onTouchEnd(e) {
+    const dx = e.changedTouches[0].clientX - touchRef.current.x;
+    const dy = e.changedTouches[0].clientY - touchRef.current.y;
+    // Geste horizontal franc (et pas un scroll vertical)
+    if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+      const idx = TABS.findIndex(t => t.id === page);
+      if (dx < 0 && idx < TABS.length - 1) setPage(TABS[idx + 1].id); // swipe gauche → page suivante
+      if (dx > 0 && idx > 0)               setPage(TABS[idx - 1].id); // swipe droite → page précédente
+    }
+  }
+
   return (
-    <div style={{minHeight:"100vh",background:C.bg,fontFamily:"DM Sans, sans-serif"}}>
+    <div
+      style={{minHeight:"100vh",background:C.bg,fontFamily:"DM Sans, sans-serif",overscrollBehaviorY:"contain"}}
+      onTouchStart={onTouchStart}
+      onTouchEnd={onTouchEnd}
+    >
       <style>{globalCSS}</style>
 
       {/* Navigation responsive 2 lignes */}
