@@ -1,6 +1,6 @@
 const { useState, useEffect, useCallback } = React;
 
-const APP_VERSION = "v3.2";
+const APP_VERSION = "v3.3";
 
 // ── API Apps Script ───────────────────────────────────────────────────────────
 const API_URL = "https://script.google.com/macros/s/AKfycbxiOA_ZhZFg1FSWf7JEII1xUbJNutGek20sg17Vr5_sWwPsTj3AI1VKim803oo7BGYGPg/exec";
@@ -830,21 +830,26 @@ function PageRecap({ data }) {
               const prev=graphData[graphData.length-2-i];
               const delta=prev&&prev.total>0?((r.total-prev.total)/prev.total*100):null;
               const isLast=i===0;
+              // Couleurs assombries pour la ligne du mois en cours (meilleure lisibilité sur fond gris)
+              const cSal = isLast ? "#1F7A99" : SERIES[0].color;  // bleu foncé
+              const cLoy = isLast ? "#B8860B" : SERIES[1].color;  // jaune foncé (dark goldenrod)
+              const cCho = isLast ? "#2E8B57" : SERIES[2].color;  // vert foncé (sea green)
+              const cTrend = delta===null ? C.ink3 : delta>=0 ? (isLast?"#2E8B57":"#96CEB4") : "#FF6B6B";
               return (
                 <tr key={i} style={{background:isLast?"#C8D4E0":C.white}}>
                   <td style={{padding:"10px 14px",fontWeight:isLast?700:400,color:isLast?C.ink:C.ink2}}>{r.month}</td>
-                  <td style={{padding:"10px 14px",color:SERIES[0].color,fontWeight:500}}>{r.salaires>0?fmtM(r.salaires):"—"}</td>
-                  <td style={{padding:"10px 14px",color:SERIES[1].color,fontWeight:500}}>{r.loyers>0?fmtM(r.loyers):"—"}</td>
-                  <td style={{padding:"10px 14px",color:SERIES[2].color,fontWeight:500}}>{r.chomage>0?fmtM(r.chomage):"—"}</td>
+                  <td style={{padding:"10px 14px",color:cSal,fontWeight:isLast?700:500}}>{r.salaires>0?fmtM(r.salaires):"—"}</td>
+                  <td style={{padding:"10px 14px",color:cLoy,fontWeight:isLast?700:500}}>{r.loyers>0?fmtM(r.loyers):"—"}</td>
+                  <td style={{padding:"10px 14px",color:cCho,fontWeight:isLast?700:500}}>{r.chomage>0?fmtM(r.chomage):"—"}</td>
                   <td style={{padding:"10px 14px"}}>
                     <span style={{
-                      background: r.total>0?"#FF6B6B18":"transparent",
-                      color: r.total>0?"#FF6B6B":C.ink3,
+                      background: r.total>0?(isLast?"#FF6B6B28":"#FF6B6B18"):"transparent",
+                      color: r.total>0?"#E04848":C.ink3,
                       padding: r.total>0?"4px 10px":"0",
                       borderRadius:6, fontWeight:r.total>0?700:400,
                     }}>{r.total>0?fmtM(r.total):"—"}</span>
                   </td>
-                  <td style={{padding:"10px 14px",fontSize:11,color:delta===null?C.ink3:delta>=0?"#96CEB4":"#FF6B6B",fontWeight:500}}>
+                  <td style={{padding:"10px 14px",fontSize:11,color:cTrend,fontWeight:isLast?700:500}}>
                     {delta===null?"—":`${delta>=0?"▲":"▼"} ${Math.abs(delta).toFixed(1)}%`}
                   </td>
                 </tr>
