@@ -1,6 +1,6 @@
 const { useState, useEffect, useCallback } = React;
 
-const APP_VERSION = "v3.0";
+const APP_VERSION = "v3.1";
 
 // ── API Apps Script ───────────────────────────────────────────────────────────
 const API_URL = "https://script.google.com/macros/s/AKfycbxiOA_ZhZFg1FSWf7JEII1xUbJNutGek20sg17Vr5_sWwPsTj3AI1VKim803oo7BGYGPg/exec";
@@ -197,6 +197,61 @@ function parseSheetData(raw) {
     })
     .filter(Boolean);
 
+  // ── DÉCLARER (revenu moyen mensuel par année) ────────────────────────────────
+  // Structure : idx0 = titre/totaux, idx1 = en-têtes, idx2 = totaux catégories, idx3+ = données mensuelles
+  // Colonnes par mois : A(0)=DATE, B(1)=Salaire, C(2)=Clients, D(3)=IFZ, E(4)=Loyers,
+  //                     F(5)=Loyers Espagne [EXCLU], G(6)=Chômage, H(7)=Kings, I(8)=Lycée,
+  //                     J(9)=Remb.Hacienda, K(10)=Classes perso, L(11)=Autres
+  // Calcul = (D+E) + (G+H+I+J+K+L) sommé sur les mois de l'année, ÷ (mois écoulés si année courante, sinon 12)
+  function extractYear(v) {
+    if (v === null || v === undefined || v === '') return null;
+    if (v instanceof Date && !isNaN(v)) return v.getFullYear();
+    const s = String(v).trim();
+    // ISO "2025-03-31T..."
+    let m = s.match(/^(\d{4})-/);
+    if (m) {
+      // ISO UTC fin de mois → peut basculer d'une année ; on ajoute 2h pour CET
+      const d = new Date(s);
+      if (!isNaN(d)) return new Date(d.getTime() + 2*60*60*1000).getFullYear();
+      return +m[1];
+    }
+    // Texte "janvier 2025" ou "01/2025"
+    m = s.match(/(\d{4})/);
+    if (m) return +m[1];
+    return null;
+  }
+
+  const declarer = raw.declarer || [];
+  const declRows = declarer.slice(3); // sauter titre + en-tête + totaux
+  const COLS_REVENU = [3, 4, 6, 7, 8, 9, 10, 11]; // D,E,G,H,I,J,K,L (exclut F=5=Loyers Espagne)
+
+  // Regrouper par année
+  const revenusParAnnee = {};
+  declRows.forEach(r => {
+    if (!r || !r[0]) return;
+    const year = extractYear(r[0]);
+    if (!year) return;
+    let somme = 0;
+    COLS_REVENU.forEach(ci => { somme += parseNum(r[ci]); });
+    if (!revenusParAnnee[year]) revenusParAnnee[year] = { total: 0, moisAvecDonnees: 0 };
+    revenusParAnnee[year].total += somme;
+    revenusParAnnee[year].moisAvecDonnees += 1;
+  });
+
+  const anneeActuelle = new Date().getFullYear();
+  const moisEcoules = new Date().getMonth() + 1; // 1-12
+  const moyenneParAnnee = {};
+  Object.keys(revenusParAnnee).forEach(y => {
+    const yNum = +y;
+    const diviseur = yNum === anneeActuelle ? moisEcoules : 12;
+    moyenneParAnnee[yNum] = {
+      total:    revenusParAnnee[y].total,
+      diviseur: diviseur,
+      moyenne:  diviseur > 0 ? revenusParAnnee[y].total / diviseur : 0,
+    };
+  });
+  const anneesDisponibles = Object.keys(moyenneParAnnee).map(Number).sort((a,b) => b - a);
+
   // ── COURS ──────────────────────────────────────────────────────────────────
   // Format Apps Script : col A = titre, col B = date "dd/MM/yyyy HH:mm", col C = durée (minutes), col D = code
   function parseCourses(rows, isDone) {
@@ -259,6 +314,7 @@ function parseSheetData(raw) {
     },
     history,
     graph,
+    revenuMoyen: { parAnnee: moyenneParAnnee, annees: anneesDisponibles, anneeActuelle },
     updatedAt: raw.updatedAt || null,
   };
 }
@@ -269,6 +325,7 @@ const DATA_FALLBACK = {
   summary: { presentH:0,presentE:0,futurH:0,futurE:0,totalH:0,totalE:0,nextH:0,nextE:0,avgRate:0,actifs:"—" },
   students: [], prevMonth:{label:"—",total:0,items:[]}, nextMonth:{label:"—",total:0,items:[]},
   courses:{cur:[],prev:[],next:[]}, history:[], graph:[],
+  revenuMoyen:{parAnnee:{},annees:[],anneeActuelle:new Date().getFullYear()},
 };
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -355,8 +412,46 @@ function PageAccueil({ data, onRefresh }) {
   const totalE = actifs.reduce((a,s)=>a+s.totalE,0);
   const pct = s.totalH>0 ? Math.round((s.presentH/s.totalH)*100) : 0;
 
+  // Revenu moyen mensuel par année
+  const rm = data.revenuMoyen || { parAnnee:{}, annees:[], anneeActuelle:new Date().getFullYear() };
+  const [selYear, setSelYear] = useState(null);
+  const yearToShow = selYear || (rm.annees.length > 0 ? rm.annees[0] : rm.anneeActuelle);
+  const rmData = rm.parAnnee[yearToShow] || { moyenne:0, total:0, diviseur:12 };
+
   return (
     <div style={{padding:"32px 28px",maxWidth:980,margin:"0 auto"}}>
+
+      {/* Bloc revenu moyen mensuel + sélecteur d'année */}
+      {rm.annees.length > 0 && (
+        <div className="fade-up" style={{
+          background:C.white, borderRadius:20, padding:"22px 26px", marginBottom:20,
+          boxShadow:C.shadow, display:"flex", justifyContent:"space-between",
+          alignItems:"center", flexWrap:"wrap", gap:16,
+          borderLeft:`5px solid #96CEB4`,
+        }}>
+          <div>
+            <div style={{fontSize:11,fontFamily:"DM Sans",fontWeight:600,color:C.ink3,textTransform:"uppercase",letterSpacing:".1em",marginBottom:6}}>
+              Revenu moyen mensuel — {yearToShow}
+            </div>
+            <div style={{fontFamily:"Playfair Display",fontSize:32,fontWeight:900,color:C.ink,lineHeight:1}}>
+              {fmtM(rmData.moyenne)}
+            </div>
+            <div style={{fontSize:11,color:C.ink3,fontFamily:"DM Sans",marginTop:5}}>
+              {fmtM(rmData.total)} sur {rmData.diviseur} mois
+            </div>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            <span style={{fontSize:10,color:C.ink3,fontFamily:"DM Sans",textTransform:"uppercase",letterSpacing:".08em"}}>Année</span>
+            <select value={yearToShow} onChange={e=>setSelYear(+e.target.value)} style={{
+              padding:"10px 16px", borderRadius:10, border:`2px solid ${C.border}`,
+              background:C.bg, color:C.ink, fontFamily:"DM Sans", fontSize:15, fontWeight:700,
+              cursor:"pointer", outline:"none",
+            }}>
+              {rm.annees.map(y => <option key={y} value={y}>{y}</option>)}
+            </select>
+          </div>
+        </div>
+      )}
 
       {/* Hero header */}
       <div className="fade-up" style={{
