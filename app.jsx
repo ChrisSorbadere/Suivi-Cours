@@ -1,6 +1,6 @@
 const { useState, useEffect, useCallback } = React;
 
-const APP_VERSION = "v3.3";
+const APP_VERSION = "v3.5";
 
 // ── API Apps Script ───────────────────────────────────────────────────────────
 const API_URL = "https://script.google.com/macros/s/AKfycbxiOA_ZhZFg1FSWf7JEII1xUbJNutGek20sg17Vr5_sWwPsTj3AI1VKim803oo7BGYGPg/exec";
@@ -862,11 +862,278 @@ function PageRecap({ data }) {
   );
 }
 
+// ── PAGE ANALYSE — vue analytique des revenus ────────────────────────────────
+function PageAnalyse({ data }) {
+  const graphData = (data.graph && data.graph.length > 0) ? data.graph : [];
+
+  // Extraire l'année depuis le label "mois année" (ex: "jan. 2025")
+  function yearOf(label) {
+    const m = String(label).match(/(\d{4})/);
+    return m ? +m[1] : null;
+  }
+
+  // Regrouper par année
+  const parAnnee = {};
+  graphData.forEach(r => {
+    const y = yearOf(r.month);
+    if (!y) return;
+    if (!parAnnee[y]) parAnnee[y] = { salaires:0, loyers:0, chomage:0, total:0, mois:0 };
+    parAnnee[y].salaires += r.salaires;
+    parAnnee[y].loyers   += r.loyers;
+    parAnnee[y].chomage  += r.chomage;
+    parAnnee[y].total    += r.total;
+    parAnnee[y].mois     += 1;
+  });
+  const annees = Object.keys(parAnnee).map(Number).sort((a,b)=>a-b);
+
+  // Année sélectionnée pour la répartition (par défaut la plus récente)
+  const [selY, setSelY] = useState(null);
+  const anneeRep = selY || (annees.length ? annees[annees.length-1] : null);
+  const repartition = anneeRep ? parAnnee[anneeRep] : null;
+
+  // Totaux globaux par source (toute la période)
+  const totSalaires = graphData.reduce((a,r)=>a+r.salaires,0);
+  const totLoyers   = graphData.reduce((a,r)=>a+r.loyers,0);
+  const totChomage  = graphData.reduce((a,r)=>a+r.chomage,0);
+  const totGlobal   = totSalaires + totLoyers + totChomage;
+
+  const SOURCES = [
+    { key:'salaires', label:'Salaires',     color:'#45B7D1' },
+    { key:'loyers',   label:'Loyers France', color:'#FF6B6B' },
+    { key:'chomage',  label:'Chômage',       color:'#FECA57' },
+  ];
+
+  // Moyenne mensuelle glissante (3 derniers mois vs 3 précédents)
+  const last3 = graphData.slice(-3);
+  const prev3 = graphData.slice(-6, -3);
+  const avgLast3 = last3.length ? last3.reduce((a,r)=>a+r.total,0)/last3.length : 0;
+  const avgPrev3 = prev3.length ? prev3.reduce((a,r)=>a+r.total,0)/prev3.length : 0;
+  const momentum = avgPrev3 > 0 ? ((avgLast3-avgPrev3)/avgPrev3*100) : null;
+
+  // Donut SVG pour la répartition
+  function Donut({ parts, size=160 }) {
+    const tot = parts.reduce((a,p)=>a+p.value,0);
+    if (tot <= 0) return <div style={{color:C.ink3,fontSize:12}}>Aucune donnée</div>;
+    const R=size/2, r=R*0.62, cx=R, cy=R;
+    let angle=-Math.PI/2;
+    const arcs = parts.map(p => {
+      const frac = p.value/tot;
+      const a0=angle, a1=angle+frac*2*Math.PI;
+      angle=a1;
+      const large = frac>0.5?1:0;
+      const x0=cx+R*Math.cos(a0), y0=cy+R*Math.sin(a0);
+      const x1=cx+R*Math.cos(a1), y1=cy+R*Math.sin(a1);
+      const xi1=cx+r*Math.cos(a1), yi1=cy+r*Math.sin(a1);
+      const xi0=cx+r*Math.cos(a0), yi0=cy+r*Math.sin(a0);
+      return { d:`M${x0},${y0} A${R},${R} 0 ${large} 1 ${x1},${y1} L${xi1},${yi1} A${r},${r} 0 ${large} 0 ${xi0},${yi0} Z`, color:p.color, frac };
+    });
+    return (
+      <svg viewBox={`0 0 ${size} ${size}`} style={{width:size,height:size}}>
+        {arcs.map((a,i)=><path key={i} d={a.d} fill={a.color}/>)}
+        <circle cx={cx} cy={cy} r={r-1} fill={C.white}/>
+        <text x={cx} y={cy-6} textAnchor="middle" fontSize={11} fill={C.ink3} fontFamily="DM Sans">Total</text>
+        <text x={cx} y={cy+12} textAnchor="middle" fontSize={14} fontWeight="700" fill={C.ink} fontFamily="Playfair Display">{Math.round(tot)}€</text>
+      </svg>
+    );
+  }
+
+  // Mini graphe en ligne — total mensuel sur toute la période
+  function LineChart() {
+    const W=820,H=180,P={t:16,r:16,b:30,l:46};
+    const iW=W-P.l-P.r, iH=H-P.t-P.b;
+    const n=graphData.length;
+    const maxV=Math.max(...graphData.map(r=>r.total),100);
+    const pts=graphData.map((r,i)=>({
+      x:P.l+(n<=1?iW/2:i*iW/(n-1)),
+      y:P.t+iH*(1-r.total/maxV),
+      r,
+    }));
+    const path=pts.map((p,i)=>`${i===0?'M':'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+    const area=`${path} L${pts[pts.length-1].x.toFixed(1)},${P.t+iH} L${pts[0].x.toFixed(1)},${P.t+iH} Z`;
+    return (
+      <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",fontFamily:"DM Sans"}}>
+        <defs>
+          <linearGradient id="lineFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#45B7D1" stopOpacity="0.25"/>
+            <stop offset="100%" stopColor="#45B7D1" stopOpacity="0"/>
+          </linearGradient>
+        </defs>
+        {[0,.25,.5,.75,1].map((f,i)=>{const v=maxV*f,y=P.t+iH*(1-f);return <g key={i}>
+          <line x1={P.l} x2={P.l+iW} y1={y} y2={y} stroke="#f0f0f8" strokeWidth={1}/>
+          <text x={P.l-6} y={y+4} textAnchor="end" fontSize={9} fill={C.ink3}>{Math.round(v)}€</text>
+        </g>;})}
+        <path d={area} fill="url(#lineFill)"/>
+        <path d={path} fill="none" stroke="#45B7D1" strokeWidth={2.5} strokeLinejoin="round"/>
+        {pts.map((p,i)=>(
+          <g key={i}>
+            <circle cx={p.x} cy={p.y} r={i===pts.length-1?5:3} fill={i===pts.length-1?"#FF6B6B":"#45B7D1"}/>
+            {(i===0||i===pts.length-1||i%3===0)&&<text x={p.x} y={P.t+iH+16} textAnchor="middle" fontSize={7} fill={C.ink3}>{p.r.month}</text>}
+          </g>
+        ))}
+      </svg>
+    );
+  }
+
+  if (graphData.length === 0) {
+    return <div style={{padding:"40px 28px",maxWidth:980,margin:"0 auto",textAlign:"center",color:C.ink3,fontFamily:"DM Sans"}}>
+      Aucune donnée d'analyse disponible.
+    </div>;
+  }
+
+  return (
+    <div style={{padding:"32px 28px",maxWidth:980,margin:"0 auto"}}>
+
+      {/* Synthèse momentum */}
+      <div className="fade-up" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:14,marginBottom:24}}>
+        <KpiCard label="Moyenne 3 derniers mois" value={fmtM(avgLast3)} color="#45B7D1"/>
+        {momentum!==null && <KpiCard label="vs 3 mois précédents" value={`${momentum>=0?"+":""}${momentum.toFixed(1)}%`} color={momentum>=0?"#96CEB4":"#FF6B6B"} delay="-2"/>}
+        <KpiCard label="Cumul Salaires" value={fmtM(totSalaires)} color="#45B7D1" delay="-3"/>
+        <KpiCard label="Cumul Loyers" value={fmtM(totLoyers)} color="#FF6B6B" delay="-4"/>
+        <KpiCard label="Cumul Chômage" value={fmtM(totChomage)} color="#FECA57" delay="-4"/>
+      </div>
+
+      {/* Courbe d'évolution */}
+      <div className="fade-up-2" style={{background:C.white,borderRadius:20,padding:"24px 28px",boxShadow:C.shadow,marginBottom:24}}>
+        <SectionTitle accent="#45B7D1">Évolution du revenu total</SectionTitle>
+        <div style={{overflowX:"auto"}}><LineChart/></div>
+      </div>
+
+      {/* Comparaison annuelle */}
+      <div className="fade-up-2" style={{background:C.white,borderRadius:20,padding:"24px 28px",boxShadow:C.shadow,marginBottom:24}}>
+        <SectionTitle accent="#96CEB4">Comparaison par année</SectionTitle>
+        <table style={{width:"100%",borderCollapse:"separate",borderSpacing:"0 4px",fontFamily:"DM Sans",fontSize:12}}>
+          <thead>
+            <tr>{["Année","Salaires","Loyers","Chômage","Total","Moy./mois"].map(h=>(
+              <th key={h} style={{textAlign:"left",padding:"8px 12px",fontSize:10,fontWeight:600,color:C.ink3,textTransform:"uppercase",letterSpacing:".08em",borderBottom:`2px solid ${C.border}`}}>{h}</th>
+            ))}</tr>
+          </thead>
+          <tbody>
+            {annees.map((y,i)=>{
+              const a=parAnnee[y];
+              const moy = a.mois>0 ? a.total/a.mois : 0;
+              return (
+                <tr key={i} style={{background:i%2===0?"#F4F7FA":C.white}}>
+                  <td style={{padding:"10px 12px",fontWeight:700,color:C.ink}}>{y}</td>
+                  <td style={{padding:"10px 12px",color:"#45B7D1",fontWeight:500}}>{fmtM(a.salaires)}</td>
+                  <td style={{padding:"10px 12px",color:"#FF6B6B",fontWeight:500}}>{fmtM(a.loyers)}</td>
+                  <td style={{padding:"10px 12px",color:"#D4A015",fontWeight:500}}>{fmtM(a.chomage)}</td>
+                  <td style={{padding:"10px 12px"}}><span style={{background:"#96CEB422",color:"#5BA86F",fontWeight:700,padding:"4px 10px",borderRadius:6}}>{fmtM(a.total)}</span></td>
+                  <td style={{padding:"10px 12px",color:C.ink2,fontWeight:600}}>{fmtM(moy)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Répartition par source (donut) */}
+      <div className="fade-up-3" style={{background:C.white,borderRadius:20,padding:"24px 28px",boxShadow:C.shadow}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16,flexWrap:"wrap",gap:10}}>
+          <SectionTitle accent="#FECA57">Répartition des revenus</SectionTitle>
+          <select value={anneeRep||''} onChange={e=>setSelY(+e.target.value)} style={{
+            padding:"8px 14px",borderRadius:10,border:`2px solid ${C.border}`,background:C.bg,
+            color:C.ink,fontFamily:"DM Sans",fontSize:14,fontWeight:700,cursor:"pointer",outline:"none",
+          }}>
+            {annees.map(y=><option key={y} value={y}>{y}</option>)}
+          </select>
+        </div>
+        {repartition && (
+          <div style={{display:"flex",gap:32,alignItems:"center",flexWrap:"wrap",justifyContent:"center"}}>
+            <Donut parts={SOURCES.map(s=>({value:repartition[s.key],color:s.color}))}/>
+            <div style={{flex:1,minWidth:200}}>
+              {SOURCES.map((s,i)=>{
+                const val=repartition[s.key];
+                const pct=repartition.total>0?(val/repartition.total*100):0;
+                return (
+                  <div key={i} style={{marginBottom:14}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                      <span style={{display:"flex",alignItems:"center",gap:8,fontSize:13,color:C.ink,fontWeight:500}}>
+                        <span style={{width:12,height:12,borderRadius:3,background:s.color}}/>{s.label}
+                      </span>
+                      <span style={{fontSize:13,fontWeight:700,color:C.ink}}>{fmtM(val)}</span>
+                    </div>
+                    <div style={{height:8,background:"#f0f0f5",borderRadius:4,overflow:"hidden"}}>
+                      <div style={{width:`${pct}%`,height:"100%",background:s.color,borderRadius:4}}/>
+                    </div>
+                    <div style={{fontSize:10,color:C.ink3,marginTop:2,textAlign:"right"}}>{pct.toFixed(1)}%</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── PAGE LIENS — raccourcis vers les feuilles Google Sheets ──────────────────
+function PageLiens() {
+  const liens = [
+    {
+      titre: "Nóminas",
+      desc: "Feuille de suivi des salaires, cours et revenus",
+      url: "https://docs.google.com/spreadsheets/d/1qFAGMnfFkznxkckuF5eGgY0XSo9qWAGao1vi_e5rkfw/edit",
+      color: "#45B7D1",
+      icon: "📊",
+    },
+    {
+      titre: "Impôts",
+      desc: "Feuille de gestion fiscale",
+      url: "https://docs.google.com/spreadsheets/d/1jThZTb0tiJE__FGkaNk9M_Qflk4QBk3tpwCq7f7z5gg/edit",
+      color: "#FF6B6B",
+      icon: "🧾",
+    },
+  ];
+
+  return (
+    <div style={{padding:"32px 28px",maxWidth:980,margin:"0 auto"}}>
+      <div className="fade-up" style={{marginBottom:24}}>
+        <SectionTitle accent="#96CEB4">Mes documents</SectionTitle>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:16}}>
+        {liens.map((l,i)=>(
+          <a key={i} href={l.url} target="_blank" rel="noopener noreferrer"
+            className={`card fade-up${i>0?"-2":""}`}
+            style={{
+              display:"block", textDecoration:"none",
+              background:C.white, borderRadius:20, padding:"26px 28px",
+              boxShadow:C.shadow, transition:"all .25s ease",
+              borderLeft:`5px solid ${l.color}`,
+            }}>
+            <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:12}}>
+              <div style={{
+                width:52,height:52,borderRadius:14,flexShrink:0,
+                background:l.color+"18",display:"flex",alignItems:"center",
+                justifyContent:"center",fontSize:26,
+              }}>{l.icon}</div>
+              <div>
+                <div style={{fontFamily:"Playfair Display",fontSize:20,fontWeight:700,color:C.ink,lineHeight:1.1}}>{l.titre}</div>
+                <div style={{fontSize:12,color:C.ink3,fontFamily:"DM Sans",marginTop:3}}>{l.desc}</div>
+              </div>
+            </div>
+            <div style={{
+              display:"inline-flex",alignItems:"center",gap:6,
+              color:l.color,fontFamily:"DM Sans",fontSize:13,fontWeight:600,
+              marginTop:4,
+            }}>
+              Ouvrir la feuille
+              <span style={{fontSize:16,lineHeight:1}}>→</span>
+            </div>
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── ROOT ──────────────────────────────────────────────────────────────────────
 const TABS = [
   {id:"accueil",label:"Tableau de bord"},
   {id:"cours",  label:"Cours du mois"},
   {id:"recap",  label:"Historique"},
+  {id:"analyse",label:"Analyse"},
+  {id:"liens",  label:"Liens"},
 ];
 
 function App() {
@@ -975,6 +1242,8 @@ function App() {
       {(!loading || data.month !== "—") && page==="accueil" && <PageAccueil data={data} onRefresh={fetchData}/>}
       {(!loading || data.month !== "—") && page==="cours"   && <PageCours   data={data}/>}
       {(!loading || data.month !== "—") && page==="recap"   && <PageRecap   data={data}/>}
+      {(!loading || data.month !== "—") && page==="analyse" && <PageAnalyse data={data}/>}
+      {page==="liens" && <PageLiens/>}
     </div>
   );
 }
