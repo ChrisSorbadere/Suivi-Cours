@@ -1,11 +1,200 @@
+// Comptes — v6.0 (source JSX, compilée en app.js)
 const {
   useState,
   useEffect,
-  useCallback
+  useRef,
+  useMemo
 } = React;
-const APP_VERSION = "v5.5";
-const API_URL = "https://script.google.com/macros/s/AKfycbxyKJD9etJlzioM09crYIGHXqxNGZXq0-jadNDz3YMGMYAoZfeZ4dNmNsdne4vilEtUHw/exec";
-const FIN_COMPTES = ['Compte courant', 'Épargne France', 'Épargne Espagne'];
+const APP_VERSION = 'v6.0';
+const API_URL = 'https://script.google.com/macros/s/AKfycbxyKJD9etJlzioM09crYIGHXqxNGZXq0-jadNDz3YMGMYAoZfeZ4dNmNsdne4vilEtUHw/exec';
+const COMPTES = ['Compte courant', 'Épargne France', 'Épargne Espagne'];
+const LIENS = {
+  nominas: 'https://docs.google.com/spreadsheets/d/1qFAGMnfFkznxkckuF5eGgY0XSo9qWAGao1vi_e5rkfw/edit',
+  impots: 'https://docs.google.com/spreadsheets/d/1jThZTb0tiJE__FGkaNk9M_Qflk4QBk3tpwCq7f7z5gg/edit'
+};
+const CLE_CACHE = 'comptes-v6';
+const CLE_ANCIENNE = 'suivi-cours-donnees';
+const CLE_THEME = 'comptes-theme';
+const PAL_REV = ['var(--rev)', 'var(--rev2)', 'var(--rev3)', 'var(--rev4)', 'var(--rev5)'];
+const PAL_DEP = ['var(--dep)', 'var(--dep2)', 'var(--dep3)', 'var(--dep4)'];
+
+/* ---------- Dates et nombres ---------- */
+
+const MOIS_L = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
+const MOIS_C = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
+const JOURS = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'];
+function ymDe(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+function ymAjoute(m, n) {
+  const y = +m.slice(0, 4),
+    mm = +m.slice(5, 7);
+  return ymDe(new Date(y, mm - 1 + n, 1));
+}
+function moisNom(m) {
+  return MOIS_L[+m.slice(5, 7) - 1];
+}
+function moisLong(m) {
+  return moisNom(m) + ' ' + m.slice(0, 4);
+}
+function moisTitre(m) {
+  const s = moisLong(m);
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+function moisCourt(m) {
+  return MOIS_C[+m.slice(5, 7) - 1];
+}
+function finDeMois(m) {
+  const y = +m.slice(0, 4),
+    mm = +m.slice(5, 7);
+  return new Date(y, mm, 0).getDate() + ' ' + moisNom(m);
+}
+function estMois(s) {
+  return /^\d{4}-\d{2}$/.test(s);
+}
+function num(v) {
+  if (v === '' || v === null || v === undefined) return 0;
+  if (typeof v === 'number') return isNaN(v) ? 0 : v;
+  const n = parseFloat(String(v).replace(/[\s  €]/g, '').replace(',', '.'));
+  return isNaN(n) ? 0 : n;
+}
+function vide(v) {
+  return v === '' || v === null || v === undefined;
+}
+function eur(v) {
+  return (Math.round(v * 100) / 100).toLocaleString('fr-FR', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }) + ' €';
+}
+function eurSigne(v) {
+  return (v > 0 ? '+' : v < 0 ? '−' : '') + eur(Math.abs(v));
+}
+function pourSaisie(v) {
+  if (vide(v)) return '';
+  if (typeof v === 'number') return v.toFixed(2).replace('.', ',');
+  return String(v);
+}
+function nettoyer(v) {
+  return String(v).replace(/[^\d.,-]/g, '');
+}
+function capital(s) {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/* ---------- Données ---------- */
+
+function moisTexte(v) {
+  if (v instanceof Date) return ymDe(v);
+  const s = String(v === null || v === undefined ? '' : v).trim();
+  if (estMois(s)) return s;
+  const d = new Date(s);
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s) && !isNaN(d)) return ymDe(d);
+  return s;
+}
+function analyser(raw) {
+  const r = raw || {};
+  const lignes = t => (t || []).slice(1).filter(x => x && String(x[0]).trim());
+  const cats = lignes(r.finCategories).map(x => ({
+    nom: String(x[0]).trim(),
+    type: String(x[1]).trim() === 'depense' ? 'depense' : 'revenu',
+    actif: x[2] !== false && String(x[2]).toUpperCase() !== 'FALSE'
+  }));
+  const arch = lignes(r.finArchives).map(x => ({
+    mois: moisTexte(x[0]),
+    categorie: String(x[1]).trim(),
+    montant: num(x[2])
+  })).filter(a => estMois(a.mois));
+  const sold = lignes(r.finSoldes).map(x => ({
+    mois: moisTexte(x[0]),
+    compte: String(x[1]).trim(),
+    montant: num(x[2])
+  })).filter(s => estMois(s.mois));
+  const typeDe = {};
+  cats.forEach(c => {
+    typeDe[c.nom] = c.type;
+  });
+  const parMois = {};
+  const fiche = m => parMois[m] || (parMois[m] = {
+    rev: 0,
+    dep: 0,
+    cats: {},
+    soldes: null
+  });
+  arch.forEach(a => {
+    const f = fiche(a.mois);
+    f.cats[a.categorie] = (f.cats[a.categorie] || 0) + a.montant;
+    if ((typeDe[a.categorie] || 'revenu') === 'depense') f.dep += a.montant;else f.rev += a.montant;
+  });
+  sold.forEach(s => {
+    const f = fiche(s.mois);
+    if (!f.soldes) f.soldes = {};
+    f.soldes[s.compte] = (f.soldes[s.compte] || 0) + s.montant;
+  });
+  const moisListe = Object.keys(parMois).sort();
+  const moisArch = Array.from(new Set(arch.map(a => a.mois))).sort();
+  const moisSoldes = moisListe.filter(m => parMois[m].soldes);
+  return {
+    cats,
+    arch,
+    sold,
+    typeDe,
+    parMois,
+    moisListe,
+    moisArch,
+    moisSoldes
+  };
+}
+function dernierAvant(d, cible) {
+  let res = null;
+  d.moisListe.forEach(m => {
+    if (m < cible) res = m;
+  });
+  return res;
+}
+function lireCache() {
+  try {
+    const brut = localStorage.getItem(CLE_CACHE);
+    if (brut) {
+      const o = JSON.parse(brut);
+      if (o && o.raw) return o;
+    }
+    const ancien = localStorage.getItem(CLE_ANCIENNE);
+    if (ancien) {
+      const o = JSON.parse(ancien);
+      if (o && o.raw && o.raw.finCategories) {
+        return {
+          raw: {
+            finCategories: o.raw.finCategories,
+            finArchives: o.raw.finArchives,
+            finSoldes: o.raw.finSoldes
+          },
+          at: o.at
+        };
+      }
+    }
+  } catch (e) {/* stockage indisponible */}
+  return null;
+}
+function ecrireCache(raw) {
+  try {
+    localStorage.setItem(CLE_CACHE, JSON.stringify({
+      raw: raw,
+      at: Date.now()
+    }));
+    localStorage.removeItem(CLE_ANCIENNE);
+  } catch (e) {/* sans conséquence */}
+}
+async function apiGet() {
+  const res = await fetch(API_URL + '?only=fin');
+  const raw = await res.json();
+  if (raw.error) throw new Error(raw.error);
+  return {
+    finCategories: raw.finCategories,
+    finArchives: raw.finArchives,
+    finSoldes: raw.finSoldes
+  };
+}
 async function apiPost(action, payload) {
   const res = await fetch(API_URL, {
     method: 'POST',
@@ -21,2972 +210,1406 @@ async function apiPost(action, payload) {
   if (!json.ok) throw new Error(json.error || 'Erreur inconnue');
   return json.result;
 }
-function moisLisible(ym) {
-  const MM = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
-  const m = String(ym).match(/^(\d{4})-(\d{2})$/);
-  if (!m) return String(ym);
-  return MM[+m[2] - 1] + ' ' + m[1];
-}
-function nettoyerSaisie(v) {
-  return String(v).replace(/[^\d.,-]/g, '');
-}
-function num(v) {
-  if (v === '' || v === null || v === undefined) return 0;
-  const n = parseFloat(String(v).replace(/\s/g, '').replace(',', '.'));
-  return isNaN(n) ? 0 : n;
-}
-function moisCourt(ym) {
-  const MM = ["jan.", "fév.", "mars", "avr.", "mai", "juin", "juil.", "août", "sep.", "oct.", "nov.", "déc."];
-  const m = String(ym).match(/^(\d{4})-(\d{2})$/);
-  if (!m) return String(ym);
-  return MM[+m[2] - 1] + ' ' + m[1];
-}
-function moisCourantYM() {
-  const d = new Date();
-  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
-}
-const STUDENT_COLORS_MAP = {
-  "1": "#FF6B6B",
-  "2": "#4ECDC4",
-  "3": "#45B7D1",
-  "4": "#96CEB4",
-  "5": "#FECA57",
-  "6": "#FF9F43",
-  "7": "#48DBFB",
-  "8": "#FF9FF3"
-};
-function parseDuration(val) {
-  if (!val) return 0;
-  if (typeof val === 'number') {
-    if (val < 1) return val * 24;
-    if (val < 24) return val;
-    return val / 60;
-  }
-  return 0;
-}
-function parseDate(val) {
-  if (!val) return null;
-  if (val instanceof Date) return val;
-  const s = String(val);
-  if (s.includes('T') && (s.endsWith('Z') || s.includes('+00'))) {
-    const d = new Date(s);
-    if (!isNaN(d)) {
-      return new Date(d.getTime() + 60 * 60 * 1000);
-    }
-  }
-  const m = s.match(/Date\((\d+),(\d+),(\d+),?(\d*),?(\d*)/);
-  if (m) return new Date(+m[1], +m[2], +m[3], +(m[4] || 0), +(m[5] || 0));
-  const p = s.match(/(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})/);
-  if (p) return new Date(+p[3], +p[2] - 1, +p[1], +p[4], +p[5]);
-  return null;
-}
-function parseSheetData(raw) {
-  const nomina = raw.nomina || [];
-  const recap = raw.recap || [];
-  const mois = raw.mois || [];
-  const moisM1 = raw.moisM1 || [];
-  const moisP1 = raw.moisP1 || [];
-  const today = String(nomina[0]?.[0] || "").replace(/[^a-zA-Z0-9éèêëàâùûüôîïç\s]/gu, '').trim();
-  const month = String(nomina[1]?.[0] || "").trim();
-  const presentH = nomina[23]?.[3] || 0;
-  const presentE = nomina[23]?.[4] || 0;
-  const futurH = nomina[23]?.[5] || 0;
-  const futurE = nomina[23]?.[6] || 0;
-  const totalH = nomina[23]?.[7] || 0;
-  const totalE = nomina[23]?.[8] || 0;
-  const nextH = nomina[10]?.[3] || 0;
-  const nextE = nomina[10]?.[4] || 0;
-  const avgRate = nomina[23]?.[2] || 0;
-  const actifs = nomina[23]?.[10] || "";
-  const students = nomina.slice(14, 23).filter(r => r[0] && typeof r[0] === 'number' && r[1]).map(r => ({
-    code: String(r[0]),
-    name: String(r[1]).trim(),
-    rate: r[2] || 0,
-    presentH: r[3] || 0,
-    presentE: r[4] || 0,
-    futurH: r[5] || 0,
-    futurE: r[6] || 0,
-    totalH: r[7] || 0,
-    totalE: r[8] || 0,
-    color: STUDENT_COLORS_MAP[String(r[0])] || "#888"
-  }));
-  const m1rows = nomina.slice(2, 12).filter(r => r[6] && !String(r[6]).includes('TOTAL') && String(r[6]).length > 1);
-  const m1TotalE = nomina[11]?.[8] || 0;
-  const m1Label = "Mois précédent";
-  const m2rows = nomina.slice(2, 12).filter(r => r[9] && !String(r[9]).includes('TOTAL') && String(r[9]).length > 1);
-  const m2TotalE = nomina[11]?.[11] || 0;
-  const history = recap.slice(2).filter(r => r[0] && (r[1] || r[2])).map(r => {
-    let d = r[0];
-    if (typeof d === 'string') {
-      if (d.includes('T') && d.endsWith('Z')) {
-        const raw = new Date(d);
-        d = !isNaN(raw) ? new Date(raw.getTime() + 2 * 60 * 60 * 1000) : null;
-      } else {
-        const m = d.match(/Date\((\d+),(\d+)/);
-        if (m) d = new Date(+m[1], +m[2], 1);
-      }
-    }
-    if (!(d instanceof Date) || isNaN(d)) return null;
-    const salary = typeof r[2] === 'number' ? r[2] : 0;
-    if (salary <= 0) return null;
-    return {
-      month: d.toLocaleString('fr-FR', {
-        month: 'short',
-        year: 'numeric'
-      }),
-      salary: salary,
-      hours: typeof r[1] === 'number' ? r[1] : 0,
-      client: String(r[4] || '—')
-    };
-  }).filter(Boolean);
-  const MOIS_FR = ["jan.", "fév.", "mars", "avr.", "mai", "juin", "juil.", "août", "sep.", "oct.", "nov.", "déc."];
-  function parseNum(v) {
-    if (typeof v === 'number') return v;
-    if (v === null || v === undefined || v === '') return 0;
-    const cleaned = String(v).replace(/[€\s\u00A0\u202F]/g, '').replace(/\./g, m => m).replace(',', '.');
-    const n = parseFloat(cleaned);
-    return isNaN(n) ? 0 : n;
-  }
-  function parseMonthLabel(v) {
-    if (v === null || v === undefined || v === '') return null;
-    if (v instanceof Date && !isNaN(v)) {
-      return v.toLocaleString('fr-FR', {
-        month: 'short',
-        year: 'numeric'
-      });
-    }
-    const s = String(v).trim();
-    let m = s.match(/^(\d{1,2})\/(\d{4})$/);
-    if (m) return `${MOIS_FR[+m[1] - 1]} ${m[2]}`;
-    m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-    if (m) return `${MOIS_FR[+m[1] - 1]} ${m[3]}`;
-    if (s.includes('T') && s.endsWith('Z')) {
-      const d = new Date(s);
-      if (!isNaN(d)) {
-        const local = new Date(d.getTime() + 2 * 60 * 60 * 1000);
-        return local.toLocaleString('fr-FR', {
-          month: 'short',
-          year: 'numeric'
-        });
-      }
-    }
-    m = s.match(/Date\((\d+),(\d+)/);
-    if (m) return `${MOIS_FR[+m[2]]} ${m[1]}`;
-    const d = new Date(s);
-    if (!isNaN(d)) return d.toLocaleString('fr-FR', {
-      month: 'short',
-      year: 'numeric'
-    });
-    return null;
-  }
-  const graphRows = raw.graph || [];
-  const graph = graphRows.slice(1).map(r => {
-    if (!r || !r[0]) return null;
-    const label = parseMonthLabel(r[0]);
-    if (!label) return null;
-    const salaires = parseNum(r[1]);
-    const loyers = parseNum(r[2]);
-    const chomage = parseNum(r[3]);
-    let total = parseNum(r[4]);
-    if (total === 0 && (salaires > 0 || loyers > 0 || chomage > 0)) {
-      total = salaires + loyers + chomage;
-    }
-    return {
-      month: label,
-      salaires,
-      loyers,
-      chomage,
-      total
-    };
-  }).filter(Boolean);
-  function extractYear(v) {
-    if (v === null || v === undefined || v === '') return null;
-    if (v instanceof Date && !isNaN(v)) return v.getFullYear();
-    const s = String(v).trim();
-    let m = s.match(/^(\d{4})-/);
-    if (m) {
-      const d = new Date(s);
-      if (!isNaN(d)) return new Date(d.getTime() + 2 * 60 * 60 * 1000).getFullYear();
-      return +m[1];
-    }
-    m = s.match(/(\d{4})/);
-    if (m) return +m[1];
-    return null;
-  }
-  const declarer = raw.declarer || [];
-  const declRows = declarer.slice(3);
-  const COLS_REVENU = [3, 4, 6, 7, 8, 9, 10, 11];
-  const revenusParAnnee = {};
-  declRows.forEach(r => {
-    if (!r || !r[0]) return;
-    const year = extractYear(r[0]);
-    if (!year) return;
-    let somme = 0;
-    COLS_REVENU.forEach(ci => {
-      somme += parseNum(r[ci]);
-    });
-    if (!revenusParAnnee[year]) revenusParAnnee[year] = {
-      total: 0,
-      moisAvecDonnees: 0
-    };
-    revenusParAnnee[year].total += somme;
-    revenusParAnnee[year].moisAvecDonnees += 1;
-  });
-  const anneeActuelle = new Date().getFullYear();
-  const moisEcoules = new Date().getMonth() + 1;
-  const moyenneParAnnee = {};
-  Object.keys(revenusParAnnee).forEach(y => {
-    const yNum = +y;
-    const diviseur = yNum === anneeActuelle ? moisEcoules : 12;
-    moyenneParAnnee[yNum] = {
-      total: revenusParAnnee[y].total,
-      diviseur: diviseur,
-      moyenne: diviseur > 0 ? revenusParAnnee[y].total / diviseur : 0
-    };
-  });
-  const anneesDisponibles = Object.keys(moyenneParAnnee).map(Number).sort((a, b) => b - a);
-  function parseCourses(rows, isDone) {
-    const now = new Date();
-    return rows.filter(r => r[0] && r[1] && r[3] && /^\d$/.test(String(r[3]).trim())).map(r => {
-      const d = parseDate(r[1]);
-      if (!d) return null;
-      let durationH = 1;
-      const titleMatch = String(r[0]).match(/(\d+)h(\d+)-(\d+)h(\d+)/);
-      if (titleMatch) {
-        const start = +titleMatch[1] * 60 + +titleMatch[2];
-        const end2 = +titleMatch[3] * 60 + +titleMatch[4];
-        durationH = (end2 - start) / 60;
-      }
-      const durMin = durationH * 60;
-      const end = new Date(d.getTime() + durMin * 60000);
-      const done = isDone !== undefined ? isDone : end <= now;
-      const code = String(r[3]).trim();
-      const st = students.find(s => s.code === code);
-      return {
-        code,
-        name: st?.name || `Élève ${code}`,
-        date: d.toLocaleDateString('fr-FR', {
-          weekday: 'short',
-          day: 'numeric',
-          month: 'short'
-        }),
-        time: d.toLocaleTimeString('fr-FR', {
-          hour: '2-digit',
-          minute: '2-digit'
-        }),
-        done,
-        durationH
-      };
-    }).filter(Boolean);
-  }
-  const finCategories = (raw.finCategories || []).slice(1).filter(r => r && String(r[0]).trim()).map(r => ({
-    nom: String(r[0]).trim(),
-    type: String(r[1]).trim() === 'depense' ? 'depense' : 'revenu',
-    actif: r[2] !== false && String(r[2]).toUpperCase() !== 'FALSE'
-  }));
-  const finArchives = (raw.finArchives || []).slice(1).filter(r => r && String(r[0]).trim()).map(r => ({
-    mois: String(r[0]).trim(),
-    categorie: String(r[1]).trim(),
-    montant: parseNum(r[2])
-  }));
-  const finSoldes = (raw.finSoldes || []).slice(1).filter(r => r && String(r[0]).trim()).map(r => ({
-    mois: String(r[0]).trim(),
-    compte: String(r[1]).trim(),
-    montant: parseNum(r[2])
-  }));
-  const typeParCat = {};
-  finCategories.forEach(c => {
-    typeParCat[c.nom] = c.type;
-  });
-  const moisPresents = {};
-  finArchives.forEach(a => {
-    moisPresents[a.mois] = true;
-  });
-  finSoldes.forEach(s => {
-    moisPresents[s.mois] = true;
-  });
-  const finMensuel = Object.keys(moisPresents).sort().map(m => {
-    const lignes = finArchives.filter(a => a.mois === m);
-    let revenus = 0,
-      depenses = 0;
-    const parCat = {};
-    lignes.forEach(a => {
-      if (typeParCat[a.categorie] === 'depense') depenses += a.montant;else revenus += a.montant;
-      parCat[a.categorie] = (parCat[a.categorie] || 0) + a.montant;
-    });
-    const patrimoine = finSoldes.filter(s => s.mois === m).reduce((t, x) => t + x.montant, 0);
-    return {
-      mois: m,
-      label: moisCourt(m),
-      annee: +m.slice(0, 4),
-      revenus: revenus,
-      depenses: depenses,
-      solde: revenus - depenses,
-      patrimoine: patrimoine,
-      parCat: parCat
-    };
-  });
-  return {
-    today,
-    month,
-    summary: {
-      presentH,
-      presentE,
-      futurH,
-      futurE,
-      totalH,
-      totalE,
-      nextH,
-      nextE,
-      avgRate: Math.round(avgRate * 100) / 100,
-      actifs: String(actifs)
-    },
-    students,
-    prevMonth: {
-      label: m1Label,
-      total: m1TotalE,
-      items: m1rows.map(r => ({
-        name: String(r[6]),
-        h: r[7] || 0,
-        e: r[8] || 0
-      }))
-    },
-    nextMonth: {
-      label: "Mois prochain",
-      total: m2TotalE,
-      items: m2rows.map(r => ({
-        name: String(r[9]),
-        h: r[10] || 0,
-        e: r[11] || 0
-      }))
-    },
-    courses: {
-      cur: parseCourses(mois),
-      prev: parseCourses(moisM1, true),
-      next: parseCourses(moisP1, false)
-    },
-    history,
-    graph,
-    revenuMoyen: {
-      parAnnee: moyenneParAnnee,
-      annees: anneesDisponibles,
-      anneeActuelle
-    },
-    finCategories: finCategories,
-    finArchives: finArchives,
-    finSoldes: finSoldes,
-    finMensuel: finMensuel,
-    updatedAt: raw.updatedAt || null
-  };
-}
-const DATA_FALLBACK = {
-  today: "Chargement…",
-  month: "—",
-  summary: {
-    presentH: 0,
-    presentE: 0,
-    futurH: 0,
-    futurE: 0,
-    totalH: 0,
-    totalE: 0,
-    nextH: 0,
-    nextE: 0,
-    avgRate: 0,
-    actifs: "—"
-  },
-  students: [],
-  prevMonth: {
-    label: "—",
-    total: 0,
-    items: []
-  },
-  nextMonth: {
-    label: "—",
-    total: 0,
-    items: []
-  },
-  courses: {
-    cur: [],
-    prev: [],
-    next: []
-  },
-  history: [],
-  graph: [],
-  revenuMoyen: {
-    parAnnee: {},
-    annees: [],
-    anneeActuelle: new Date().getFullYear()
-  },
-  finCategories: [],
-  finArchives: [],
-  finSoldes: [],
-  finMensuel: []
-};
-const fmtM = v => (v || 0).toLocaleString("fr-FR", {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2
-}) + " €";
-const fmtH = h => {
-  if (!h || h <= 0) return "0h";
-  const hh = Math.floor(h),
-    mm = Math.round((h - hh) * 60);
-  return `${hh}h${mm > 0 ? String(mm).padStart(2, "0") : ""}`;
-};
-const C = {
-  bg: "#D6DEE8",
-  white: "#FFFFFF",
-  ink: "#1A1A2E",
-  ink2: "#4A4A6A",
-  ink3: "#9090B0",
-  border: "#E8E8F0",
-  shadow: "0 2px 16px rgba(0,0,0,0.07)",
-  shadowHov: "0 6px 32px rgba(0,0,0,0.13)"
-};
-const STUDENT_COLORS = {
-  "1": "#FF6B6B",
-  "2": "#4ECDC4",
-  "3": "#45B7D1",
-  "4": "#96CEB4",
-  "5": "#FECA57",
-  "6": "#FF9F43",
-  "7": "#48DBFB",
-  "8": "#FF9FF3"
-};
-const sc = code => STUDENT_COLORS[code] || "#888";
-const globalCSS = `
-  @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=DM+Sans:wght@300;400;500;600&display=swap');
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { overscroll-behavior-y: contain; }
-  body { background: ${C.bg}; }
-  @keyframes fadeUp { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:translateY(0); } }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .fade-up { animation: fadeUp 0.4s ease both; }
-  .fade-up-2 { animation: fadeUp 0.4s 0.08s ease both; }
-  .fade-up-3 { animation: fadeUp 0.4s 0.16s ease both; }
-  .fade-up-4 { animation: fadeUp 0.4s 0.24s ease both; }
-  .card:hover { transform: translateY(-2px); box-shadow: ${C.shadowHov}; }
-  .tab-btn:hover { background: #f0f0f8; }
-  .nav-tab.active { border-bottom: 3px solid ${C.ink}; color: ${C.ink}; }
-  .nav-tab:hover:not(.active) { color: ${C.ink2}; }
-`;
-function KpiCard({
-  label,
-  value,
-  sub,
-  color,
-  delay = ""
+
+/* ---------- Icônes ---------- */
+
+function Ico({
+  d,
+  size = 22,
+  sw = 2,
+  children,
+  color = 'currentColor'
 }) {
-  return React.createElement("div", {
-    className: `card fade-up${delay}`,
+  return /*#__PURE__*/React.createElement("svg", {
+    width: size,
+    height: size,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: color,
+    strokeWidth: sw,
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    "aria-hidden": "true",
     style: {
-      background: C.white,
-      borderRadius: 16,
-      padding: "20px 22px",
-      boxShadow: C.shadow,
-      transition: "all .25s ease",
-      borderTop: `4px solid ${color}`
-    }
-  }, React.createElement("div", {
-    style: {
-      fontSize: 11,
-      fontFamily: "DM Sans",
-      fontWeight: 600,
-      color: C.ink3,
-      textTransform: "uppercase",
-      letterSpacing: ".1em",
-      marginBottom: 6
-    }
-  }, label), React.createElement("div", {
-    style: {
-      fontSize: 26,
-      fontFamily: "Playfair Display",
-      fontWeight: 700,
-      color: C.ink,
-      lineHeight: 1
-    }
-  }, value), sub && React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: C.ink3,
-      marginTop: 5,
-      fontFamily: "DM Sans"
-    }
-  }, sub));
-}
-function StudentChip({
-  code,
-  name,
-  color,
-  small
-}) {
-  return React.createElement("span", {
-    style: {
-      display: "inline-flex",
-      alignItems: "center",
-      gap: 6,
-      background: color + "18",
-      border: `1.5px solid ${color}44`,
-      borderRadius: 20,
-      padding: small ? "3px 10px" : "5px 14px",
-      fontFamily: "DM Sans",
-      fontSize: small ? 10 : 12,
-      fontWeight: 600,
-      color: color
-    }
-  }, React.createElement("span", {
-    style: {
-      width: 7,
-      height: 7,
-      borderRadius: "50%",
-      background: color,
       flexShrink: 0
     }
-  }), small ? code : `${code} · ${name}`);
+  }, d ? /*#__PURE__*/React.createElement("path", {
+    d: d
+  }) : children);
 }
-function SectionTitle({
-  children,
-  accent
+const I = {
+  gauche: 'm15 6-6 6 6 6',
+  droite: 'm9 6 6 6-6 6',
+  croix: 'M6 6l12 12M18 6 6 18',
+  plus: 'M12 5v14M5 12h14',
+  check: 'm5 12.5 4.5 4.5L19 7.5',
+  refresh: 'M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7',
+  oeil: 'M3 3l18 18M10.6 5.1A9.7 9.7 0 0 1 12 5c5 0 9 4.5 10 7-0.4 1-1.2 2.3-2.4 3.5M6.6 6.6C4.4 8 2.8 10.2 2 12c1 2.5 5 7 10 7 1.8 0 3.4-0.6 4.8-1.4',
+  externe: 'M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5',
+  lune: 'M21 13A9 9 0 1 1 11 3a7 7 0 0 0 10 10z',
+  maison: 'M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z',
+  histo: 'M3 20.5h18M6 17v-6M11 17V6M16 17v-4'
+};
+function IcoMenu() {
+  return /*#__PURE__*/React.createElement(Ico, {
+    size: 20
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M4 7h16M4 12h16M4 17h16"
+  }));
+}
+function IcoCal({
+  size = 24
 }) {
-  return React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 10,
-      marginBottom: 20
+  return /*#__PURE__*/React.createElement(Ico, {
+    size: size
+  }, /*#__PURE__*/React.createElement("rect", {
+    x: "3",
+    y: "4.5",
+    width: "18",
+    height: "16",
+    rx: "2.5"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M3 9.5h18M8 3v3M16 3v3"
+  }));
+}
+function IcoInfo({
+  color
+}) {
+  return /*#__PURE__*/React.createElement(Ico, {
+    size: 20,
+    color: color
+  }, /*#__PURE__*/React.createElement("circle", {
+    cx: "12",
+    cy: "12",
+    r: "9"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M12 11v5M12 8h.01"
+  }));
+}
+function IcoTableur() {
+  return /*#__PURE__*/React.createElement(Ico, {
+    color: "var(--barOn)"
+  }, /*#__PURE__*/React.createElement("rect", {
+    x: "4",
+    y: "3",
+    width: "16",
+    height: "18",
+    rx: "2"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M4 9h16M4 15h16M10 9v12"
+  }));
+}
+function IcoDoc() {
+  return /*#__PURE__*/React.createElement(Ico, {
+    color: "var(--barOn)"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M7 3h7l4 4v14H7z"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M14 3v4h4M10 12h5M10 16h5"
+  }));
+}
+
+/* ---------- Feuille (bottom sheet) ---------- */
+
+function Feuille({
+  onClose,
+  fond,
+  children,
+  labelId
+}) {
+  const fermer = useRef(onClose);
+  fermer.current = onClose;
+  useEffect(() => {
+    function k(e) {
+      if (e.key === 'Escape') fermer.current();
     }
-  }, accent && React.createElement("div", {
+    window.addEventListener('keydown', k);
+    const avant = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      window.removeEventListener('keydown', k);
+      document.body.style.overflow = avant;
+    };
+  }, []);
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "scrim",
+    onClick: onClose
+  }), /*#__PURE__*/React.createElement("div", {
+    className: 'feuille' + (fond ? ' fond' : ''),
+    role: "dialog",
+    "aria-modal": "true",
+    "aria-labelledby": labelId,
     style: {
-      width: 4,
-      height: 28,
-      borderRadius: 2,
-      background: accent
+      left: 0,
+      right: 0
     }
-  }), React.createElement("h2", {
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "poignee"
+  }), children));
+}
+
+/* ---------- Accueil ---------- */
+
+function Repartition({
+  cats,
+  pal
+}) {
+  const total = cats.reduce((a, c) => a + c.v, 0);
+  if (total <= 0) return null;
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "pile",
+    role: "img",
+    "aria-label": cats.map(c => c.nom + ' ' + eur(c.v)).join(', ')
+  }, cats.map((c, i) => /*#__PURE__*/React.createElement("span", {
+    key: c.nom,
     style: {
-      fontFamily: "Playfair Display",
-      fontSize: 20,
-      fontWeight: 700,
-      color: C.ink
+      flexGrow: c.v,
+      background: pal[i % pal.length]
     }
-  }, children));
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "legende"
+  }, cats.map((c, i) => /*#__PURE__*/React.createElement("div", {
+    className: "it",
+    key: c.nom
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "pt",
+    style: {
+      background: pal[i % pal.length]
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "nom"
+  }, c.nom), /*#__PURE__*/React.createElement("span", {
+    className: "mt"
+  }, eur(c.v)), /*#__PURE__*/React.createElement("span", {
+    className: "pc"
+  }, (c.v / total * 100).toLocaleString('fr-FR', {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1
+  }), " %")))));
+}
+function CarteMois({
+  d,
+  m,
+  onVoir,
+  onModifier
+}) {
+  const f = d.parMois[m] || {
+    rev: 0,
+    dep: 0,
+    cats: {}
+  };
+  const detail = type => Object.keys(f.cats).filter(c => (d.typeDe[c] || 'revenu') === type && f.cats[c] > 0).map(c => ({
+    nom: c,
+    v: f.cats[c]
+  })).sort((a, b) => b.v - a.v);
+  const rev = detail('revenu');
+  const dep = detail('depense');
+  return /*#__PURE__*/React.createElement("section", {
+    className: "carte",
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ligne-tete"
+  }, /*#__PURE__*/React.createElement("h2", null, moisTitre(m)), /*#__PURE__*/React.createElement("button", {
+    className: "lien",
+    onClick: onModifier
+  }, "Modifier")), /*#__PURE__*/React.createElement("div", {
+    className: "trio"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "lib"
+  }, "Revenus"), /*#__PURE__*/React.createElement("div", {
+    className: "val c-rev"
+  }, eur(f.rev))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "lib"
+  }, "Dépenses"), /*#__PURE__*/React.createElement("div", {
+    className: "val c-dep"
+  }, f.dep ? eur(f.dep) : '—')), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "lib"
+  }, "Solde"), /*#__PURE__*/React.createElement("div", {
+    className: "val"
+  }, eurSigne(f.rev - f.dep)))), !f.dep && /*#__PURE__*/React.createElement("div", {
+    className: "petit"
+  }, "Dépenses non saisies pour ce mois."), rev.length > 0 && /*#__PURE__*/React.createElement(Repartition, {
+    cats: rev,
+    pal: PAL_REV
+  }), dep.length > 0 && /*#__PURE__*/React.createElement(Repartition, {
+    cats: dep,
+    pal: PAL_DEP
+  }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("button", {
+    className: "lien",
+    onClick: onVoir
+  }, "Voir l'historique ", /*#__PURE__*/React.createElement(Ico, {
+    d: I.droite,
+    size: 16
+  }))));
+}
+function Sparkline({
+  d,
+  fin
+}) {
+  const mois = [];
+  for (let i = 11; i >= 0; i--) mois.push(ymAjoute(fin, -i));
+  const vals = mois.map(m => d.parMois[m] ? d.parMois[m].rev : 0);
+  const avecDonnees = mois.filter(m => d.parMois[m] && d.parMois[m].rev > 0);
+  if (avecDonnees.length < 2) return null;
+  const W = 320,
+    H = 90,
+    P = 6;
+  const max = Math.max.apply(null, vals.concat([1]));
+  const pts = vals.map((v, i) => [P + i * (W - 2 * P) / 11, H - P - v / max * (H - 2 * P)]);
+  const line = pts.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+  const area = P + ',' + (H - P) + ' ' + line + ' ' + (W - P) + ',' + (H - P);
+  const moyenne = avecDonnees.reduce((a, m) => a + d.parMois[m].rev, 0) / avecDonnees.length;
+  let iMax = 0,
+    iMin = -1;
+  vals.forEach((v, i) => {
+    if (v > vals[iMax]) iMax = i;
+    if (v > 0 && (iMin < 0 || v < vals[iMin])) iMin = i;
+  });
+  const dernier = pts[pts.length - 1];
+  return /*#__PURE__*/React.createElement("section", {
+    className: "carte",
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 2
+    }
+  }, /*#__PURE__*/React.createElement("h2", null, "Revenus sur 12 mois"), /*#__PURE__*/React.createElement("span", {
+    className: "petit"
+  }, "De ", moisLong(mois[0]), " à ", moisLong(fin))), /*#__PURE__*/React.createElement("svg", {
+    viewBox: '0 0 ' + W + ' ' + H,
+    width: "100%",
+    height: "90",
+    preserveAspectRatio: "none",
+    role: "img",
+    "aria-label": 'Revenus mensuels de ' + moisLong(mois[0]) + ' à ' + moisLong(fin)
+  }, /*#__PURE__*/React.createElement("polygon", {
+    points: area,
+    fill: "var(--sparkFill)"
+  }), /*#__PURE__*/React.createElement("polyline", {
+    points: line,
+    fill: "none",
+    stroke: "var(--spark)",
+    strokeWidth: "2.5",
+    strokeLinejoin: "round",
+    strokeLinecap: "round",
+    vectorEffect: "non-scaling-stroke"
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: dernier[0],
+    cy: dernier[1],
+    r: "4",
+    fill: "var(--spark)"
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "stats3"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "lib"
+  }, "Moyenne"), /*#__PURE__*/React.createElement("div", {
+    className: "val"
+  }, eur(moyenne))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "lib"
+  }, "Plus haut · ", moisCourt(mois[iMax])), /*#__PURE__*/React.createElement("div", {
+    className: "val"
+  }, eur(vals[iMax]))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "lib"
+  }, "Plus bas · ", iMin >= 0 ? moisCourt(mois[iMin]) : '—'), /*#__PURE__*/React.createElement("div", {
+    className: "val"
+  }, iMin >= 0 ? eur(vals[iMin]) : '—'))));
 }
 function PageAccueil({
-  data,
-  onRefresh
+  d,
+  aujourdhui,
+  onMenu,
+  onGoMois,
+  onGoHist,
+  horsLigne
 }) {
-  const s = data.summary;
-  const actifs = data.students.filter(s => s.totalH > 0);
-  const totalE = actifs.reduce((a, s) => a + s.totalE, 0);
-  const pct = s.totalH > 0 ? Math.round(s.presentH / s.totalH * 100) : 0;
-  const rm = data.revenuMoyen || {
-    parAnnee: {},
-    annees: [],
-    anneeActuelle: new Date().getFullYear()
-  };
-  const [selYear, setSelYear] = useState(null);
-  const yearToShow = selYear || (rm.annees.length > 0 ? rm.annees[0] : rm.anneeActuelle);
-  const rmData = rm.parAnnee[yearToShow] || {
-    moyenne: 0,
-    total: 0,
-    diviseur: 12
-  };
-  return React.createElement("div", {
+  const courant = ymDe(aujourdhui);
+  const dateTxt = JOURS[aujourdhui.getDay()] + ' ' + aujourdhui.getDate() + ' ' + MOIS_L[aujourdhui.getMonth()];
+  const mSoldes = d.moisSoldes.length ? d.moisSoldes[d.moisSoldes.length - 1] : null;
+  const mPrec = d.moisSoldes.length > 1 ? d.moisSoldes[d.moisSoldes.length - 2] : null;
+  const total = m => COMPTES.concat(Object.keys((d.parMois[m] || {}).soldes || {}).filter(c => COMPTES.indexOf(c) < 0)).reduce((a, c) => a + ((d.parMois[m].soldes || {})[c] || 0), 0);
+  const courantSaisi = d.moisArch.indexOf(courant) >= 0;
+  const dernierArch = d.moisArch.filter(m => m <= courant).pop() || null;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "page"
+  }, /*#__PURE__*/React.createElement("header", {
+    className: "entete"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "date"
+  }, dateTxt), /*#__PURE__*/React.createElement("h1", null, "Comptes")), /*#__PURE__*/React.createElement("button", {
+    className: "rond",
+    onClick: onMenu,
+    "aria-label": "Ouvrir le menu"
+  }, /*#__PURE__*/React.createElement(IcoMenu, null))), horsLigne && /*#__PURE__*/React.createElement("div", {
+    className: "hors-ligne"
+  }, horsLigne), /*#__PURE__*/React.createElement("section", {
+    className: "hero",
+    "aria-label": "Patrimoine"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ligne-tete"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "lib"
+  }, "Patrimoine total"), mSoldes && /*#__PURE__*/React.createElement("span", {
+    className: "pill"
+  }, "au ", finDeMois(mSoldes))), mSoldes ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "total"
+  }, eur(total(mSoldes))), mPrec && /*#__PURE__*/React.createElement("div", {
+    className: "varia"
+  }, eurSigne(total(mSoldes) - total(mPrec)), " depuis fin ", moisNom(mPrec)), /*#__PURE__*/React.createElement("div", {
+    className: "comptes"
+  }, COMPTES.map(c => /*#__PURE__*/React.createElement("div", {
+    className: "compte",
+    key: c
+  }, /*#__PURE__*/React.createElement("span", null, c), /*#__PURE__*/React.createElement("span", null, eur((d.parMois[mSoldes].soldes || {})[c] || 0)))))) : /*#__PURE__*/React.createElement("div", {
+    className: "vide"
+  }, "Aucun solde saisi pour l'instant. Renseigne tes comptes dans l'onglet Mois pour suivre ton patrimoine.")), !courantSaisi && /*#__PURE__*/React.createElement("section", {
+    className: "carte",
     style: {
-      padding: "32px 28px",
-      maxWidth: 980,
-      margin: "0 auto"
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12
     }
-  }, rm.annees.length > 0 && React.createElement("div", {
-    className: "fade-up",
-    style: {
-      background: C.white,
-      borderRadius: 20,
-      padding: "22px 26px",
-      marginBottom: 20,
-      boxShadow: C.shadow,
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center",
-      flexWrap: "wrap",
-      gap: 16,
-      borderLeft: `5px solid #96CEB4`
-    }
-  }, React.createElement("div", null, React.createElement("div", {
-    style: {
-      fontSize: 11,
-      fontFamily: "DM Sans",
-      fontWeight: 600,
-      color: C.ink3,
-      textTransform: "uppercase",
-      letterSpacing: ".1em",
-      marginBottom: 6
-    }
-  }, "Revenu moyen mensuel — ", yearToShow), React.createElement("div", {
-    style: {
-      fontFamily: "Playfair Display",
-      fontSize: 32,
-      fontWeight: 900,
-      color: C.ink,
-      lineHeight: 1
-    }
-  }, fmtM(rmData.moyenne)), React.createElement("div", {
-    style: {
-      fontSize: 11,
-      color: C.ink3,
-      fontFamily: "DM Sans",
-      marginTop: 5
-    }
-  }, fmtM(rmData.total), " sur ", rmData.diviseur, " mois")), React.createElement("div", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 6
-    }
-  }, React.createElement("span", {
-    style: {
-      fontSize: 10,
-      color: C.ink3,
-      fontFamily: "DM Sans",
-      textTransform: "uppercase",
-      letterSpacing: ".08em"
-    }
-  }, "Année"), React.createElement("select", {
-    value: yearToShow,
-    onChange: e => setSelYear(+e.target.value),
-    style: {
-      padding: "10px 16px",
-      borderRadius: 10,
-      border: `2px solid ${C.border}`,
-      background: C.bg,
-      color: C.ink,
-      fontFamily: "DM Sans",
-      fontSize: 15,
-      fontWeight: 700,
-      cursor: "pointer",
-      outline: "none"
-    }
-  }, rm.annees.map(y => React.createElement("option", {
-    key: y,
-    value: y
-  }, y))))), React.createElement("div", {
-    className: "fade-up",
-    style: {
-      background: `linear-gradient(135deg, ${C.ink} 0%, #2d2d5e 100%)`,
-      borderRadius: 24,
-      padding: "32px 36px",
-      marginBottom: 28,
-      color: "white",
-      position: "relative",
-      overflow: "hidden"
-    }
-  }, React.createElement("div", {
-    style: {
-      position: "absolute",
-      top: -40,
-      right: -40,
-      width: 200,
-      height: 200,
-      borderRadius: "50%",
-      background: "rgba(255,255,255,0.04)"
-    }
-  }), React.createElement("div", {
-    style: {
-      position: "absolute",
-      bottom: -60,
-      right: 80,
-      width: 140,
-      height: 140,
-      borderRadius: "50%",
-      background: "rgba(255,255,255,0.04)"
-    }
-  }), React.createElement("div", {
-    style: {
-      fontFamily: "DM Sans",
-      fontSize: 12,
-      fontWeight: 500,
-      opacity: .6,
-      letterSpacing: ".12em",
-      textTransform: "uppercase",
-      marginBottom: 8
-    }
-  }, data.today), React.createElement("div", {
-    style: {
-      fontFamily: "Playfair Display",
-      fontSize: 34,
-      fontWeight: 900,
-      lineHeight: 1.1,
-      marginBottom: 16
-    }
-  }, data.month), React.createElement("div", {
-    style: {
-      marginBottom: 20
-    }
-  }, React.createElement("div", {
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      fontSize: 12,
-      opacity: .7,
-      fontFamily: "DM Sans",
-      marginBottom: 6
-    }
-  }, React.createElement("span", null, fmtH(s.presentH), " réalisé"), React.createElement("span", null, pct, "% du mois"), React.createElement("span", null, fmtH(s.futurH), " restant")), React.createElement("div", {
-    style: {
-      height: 8,
-      background: "rgba(255,255,255,0.15)",
-      borderRadius: 4,
-      overflow: "hidden"
-    }
-  }, React.createElement("div", {
-    style: {
-      width: `${pct}%`,
-      height: "100%",
-      background: "linear-gradient(90deg,#FECA57,#FF6B6B)",
-      borderRadius: 4,
-      transition: "width 1s ease"
-    }
-  }))), React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 32,
-      flexWrap: "wrap"
-    }
-  }, React.createElement("div", null, React.createElement("div", {
-    style: {
-      fontFamily: "Playfair Display",
-      fontSize: 38,
-      fontWeight: 900,
-      lineHeight: 1
-    }
-  }, fmtM(totalE)), React.createElement("div", {
-    style: {
-      fontSize: 12,
-      opacity: .6,
-      fontFamily: "DM Sans",
-      marginTop: 3
-    }
-  }, "Total mois en cours")), React.createElement("div", {
-    style: {
-      width: 1,
-      background: "rgba(255,255,255,0.15)",
-      margin: "4px 0"
-    }
-  }), React.createElement("div", null, React.createElement("div", {
-    style: {
-      fontFamily: "Playfair Display",
-      fontSize: 28,
-      fontWeight: 700,
-      color: "#FECA57",
-      lineHeight: 1
-    }
-  }, fmtM(data.nextMonth?.total || 0)), React.createElement("div", {
-    style: {
-      fontSize: 12,
-      opacity: .6,
-      fontFamily: "DM Sans",
-      marginTop: 3
-    }
-  }, "Mois prochain estimé")))), React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))",
-      gap: 14,
-      marginBottom: 28
-    }
-  }, React.createElement(KpiCard, {
-    label: "Heures réalisées",
-    value: fmtH(s.presentH),
-    color: "#FF6B6B",
-    delay: ""
-  }), React.createElement(KpiCard, {
-    label: "Heures restantes",
-    value: fmtH(s.futurH),
-    color: "#45B7D1",
-    delay: "-2"
-  }), React.createElement(KpiCard, {
-    label: "Total heures mois",
-    value: fmtH(s.totalH),
-    color: "#4ECDC4",
-    delay: "-3"
-  }), React.createElement(KpiCard, {
-    label: "Prix moyen / h",
-    value: `${Number(s.avgRate).toFixed(2)} €`,
-    color: "#FECA57",
-    delay: "-4"
-  }), React.createElement(KpiCard, {
-    label: "Clients actifs",
-    value: String(s.actifs).replace(/Actifs\s*:\s*/i, ""),
-    color: "#96CEB4",
-    delay: "-4"
-  })), React.createElement("div", {
-    className: "fade-up-2",
-    style: {
-      background: C.white,
-      borderRadius: 20,
-      padding: "24px 28px",
-      boxShadow: C.shadow,
-      marginBottom: 28
-    }
-  }, React.createElement(SectionTitle, {
-    accent: "#45B7D1"
-  }, "Élèves — ", data.month || "mois en cours"), React.createElement("div", {
-    style: {
-      overflowX: "auto"
-    }
-  }, React.createElement("table", {
-    style: {
-      width: "100%",
-      borderCollapse: "separate",
-      borderSpacing: "0 4px",
-      fontFamily: "DM Sans",
-      fontSize: 13
-    }
-  }, React.createElement("thead", null, React.createElement("tr", null, ["", "Élève", "Tarif", "Réalisé", "€ réal.", "Restant", "€ rest.", "Total h", "Total €"].map(h => React.createElement("th", {
-    key: h,
-    style: {
-      textAlign: "left",
-      padding: "8px 12px",
-      fontSize: 10,
-      fontWeight: 600,
-      color: C.ink3,
-      textTransform: "uppercase",
-      letterSpacing: ".08em",
-      borderBottom: `2px solid ${C.border}`
-    }
-  }, h)))), React.createElement("tbody", null, data.students.map((st, i) => {
-    const col = sc(st.code);
-    const active = st.totalH > 0;
-    return React.createElement("tr", {
-      key: i,
-      style: {
-        opacity: active ? 1 : .45
-      }
-    }, React.createElement("td", {
-      style: {
-        padding: "10px 12px"
-      }
-    }, React.createElement("div", {
-      style: {
-        width: 10,
-        height: 10,
-        borderRadius: "50%",
-        background: col
-      }
-    })), React.createElement("td", {
-      style: {
-        padding: "10px 12px",
-        fontWeight: 600,
-        color: C.ink
-      }
-    }, st.name), React.createElement("td", {
-      style: {
-        padding: "10px 12px",
-        color: C.ink3
-      }
-    }, st.rate, " €/h"), React.createElement("td", {
-      style: {
-        padding: "10px 12px",
-        fontWeight: 600,
-        color: "#FF6B6B"
-      }
-    }, fmtH(st.presentH)), React.createElement("td", {
-      style: {
-        padding: "10px 12px",
-        color: "#FF6B6B"
-      }
-    }, fmtM(st.presentE)), React.createElement("td", {
-      style: {
-        padding: "10px 12px",
-        fontWeight: 600,
-        color: "#45B7D1"
-      }
-    }, fmtH(st.futurH)), React.createElement("td", {
-      style: {
-        padding: "10px 12px",
-        color: "#45B7D1"
-      }
-    }, fmtM(st.futurE)), React.createElement("td", {
-      style: {
-        padding: "10px 12px",
-        fontWeight: 700,
-        color: C.ink
-      }
-    }, fmtH(st.totalH)), React.createElement("td", {
-      style: {
-        padding: "10px 12px"
-      }
-    }, active ? React.createElement("span", {
-      style: {
-        background: col + "18",
-        color: col,
-        fontWeight: 700,
-        padding: "4px 10px",
-        borderRadius: 8,
-        fontSize: 12
-      }
-    }, fmtM(st.totalE)) : React.createElement("span", {
-      style: {
-        color: C.ink3
-      }
-    }, "—")));
-  }), React.createElement("tr", {
-    style: {
-      borderTop: `2px solid ${C.border}`
-    }
-  }, React.createElement("td", {
-    colSpan: 3,
-    style: {
-      padding: "12px 12px",
-      fontWeight: 700,
-      fontFamily: "DM Sans",
-      color: C.ink
-    }
-  }, "TOTAL"), React.createElement("td", {
-    style: {
-      padding: "12px 12px",
-      fontWeight: 700,
-      color: "#FF6B6B"
-    }
-  }, fmtH(s.presentH)), React.createElement("td", {
-    style: {
-      padding: "12px 12px",
-      fontWeight: 700,
-      color: "#FF6B6B"
-    }
-  }, fmtM(s.presentE)), React.createElement("td", {
-    style: {
-      padding: "12px 12px",
-      fontWeight: 700,
-      color: "#45B7D1"
-    }
-  }, fmtH(s.futurH)), React.createElement("td", {
-    style: {
-      padding: "12px 12px",
-      fontWeight: 700,
-      color: "#45B7D1"
-    }
-  }, fmtM(s.futurE)), React.createElement("td", {
-    style: {
-      padding: "12px 12px",
-      fontWeight: 700,
-      color: C.ink
-    }
-  }, fmtH(s.totalH)), React.createElement("td", {
-    style: {
-      padding: "12px 12px"
-    }
-  }, React.createElement("span", {
-    style: {
-      background: "#1A1A2E",
-      color: "white",
-      fontWeight: 700,
-      padding: "5px 12px",
-      borderRadius: 8,
-      fontSize: 13
-    }
-  }, fmtM(totalE)))))))), React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 16
-    }
-  }, [{
-    data: data.prevMonth,
-    accent: "#FF6B6B",
-    icon: "◀",
-    label: "Mois précédent"
-  }, {
-    data: data.nextMonth,
-    accent: "#4ECDC4",
-    icon: "▶",
-    label: "Mois prochain"
-  }].map(({
-    data: m,
-    accent,
-    icon,
-    label
-  }, i) => React.createElement("div", {
-    key: i,
-    className: `card fade-up-${i + 3}`,
-    style: {
-      background: C.white,
-      borderRadius: 20,
-      padding: "22px 24px",
-      boxShadow: C.shadow,
-      transition: "all .25s ease"
-    }
-  }, React.createElement("div", {
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "flex-start",
-      marginBottom: 14
-    }
-  }, React.createElement("div", null, React.createElement("div", {
-    style: {
-      fontSize: 10,
-      fontFamily: "DM Sans",
-      fontWeight: 600,
-      color: C.ink3,
-      textTransform: "uppercase",
-      letterSpacing: ".1em",
-      marginBottom: 3
-    }
-  }, label), React.createElement("div", {
-    style: {
-      fontFamily: "Playfair Display",
-      fontSize: 16,
-      fontWeight: 700,
-      color: C.ink
-    }
-  }, m.label)), React.createElement("div", {
-    style: {
-      fontFamily: "Playfair Display",
-      fontSize: 22,
-      fontWeight: 900,
-      color: accent
-    }
-  }, fmtM(m.total))), React.createElement("div", {
-    style: {
-      display: "flex",
-      flexWrap: "wrap",
-      gap: 6
-    }
-  }, m.items.map((it, j) => React.createElement("div", {
-    key: j,
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center",
-      width: "100%",
-      padding: "7px 12px",
-      background: accent + "10",
-      borderRadius: 8,
-      fontSize: 12,
-      fontFamily: "DM Sans"
-    }
-  }, React.createElement("span", {
-    style: {
-      color: C.ink,
-      fontWeight: 500
-    }
-  }, it.name), React.createElement("span", {
-    style: {
-      color: accent,
-      fontWeight: 700
-    }
-  }, fmtH(it.h), " · ", fmtM(it.e)))))))));
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ligne-tete"
+  }, /*#__PURE__*/React.createElement("h2", null, moisTitre(courant)), /*#__PURE__*/React.createElement("span", {
+    className: "chip-etat attente"
+  }, "Pas encore saisi")), /*#__PURE__*/React.createElement("div", {
+    className: "petit"
+  }, dernierAvant(d, courant) ? 'Les montants de ' + moisNom(dernierAvant(d, courant)) + ' seront repris : il te suffira de corriger ce qui change.' : 'Saisis tes revenus, tes dépenses et le solde de tes comptes.'), /*#__PURE__*/React.createElement("button", {
+    className: "bouton",
+    onClick: () => onGoMois(courant)
+  }, "Saisir ", moisNom(courant))), dernierArch && /*#__PURE__*/React.createElement(CarteMois, {
+    d: d,
+    m: dernierArch,
+    onVoir: onGoHist,
+    onModifier: () => onGoMois(dernierArch)
+  }), dernierArch && /*#__PURE__*/React.createElement(Sparkline, {
+    d: d,
+    fin: dernierArch
+  }));
 }
-function PageCours({
-  data
-}) {
-  const [tab, setTab] = useState("cur");
-  const MOIS_TABS = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"];
-  const now = new Date();
-  const curM = now.getMonth(),
-    curY = now.getFullYear();
-  const prevM = curM === 0 ? 11 : curM - 1,
-    prevY = curM === 0 ? curY - 1 : curY;
-  const nextM = curM === 11 ? 0 : curM + 1,
-    nextY = curM === 11 ? curY + 1 : curY;
-  const tabs = [{
-    id: "cur",
-    label: `${MOIS_TABS[curM]} ${curY}`
-  }, {
-    id: "prev",
-    label: `${MOIS_TABS[prevM]} ${prevY}`
-  }, {
-    id: "next",
-    label: `${MOIS_TABS[nextM]} ${nextY}`
-  }];
-  const courses = data.courses && data.courses[tab] || [];
-  const byCode = courses.reduce((a, e) => {
-    if (!a[e.code]) a[e.code] = [];
-    a[e.code].push(e);
-    return a;
-  }, {});
-  return React.createElement("div", {
-    style: {
-      padding: "32px 28px",
-      maxWidth: 980,
-      margin: "0 auto"
-    }
-  }, React.createElement("div", {
-    className: "fade-up",
-    style: {
-      marginBottom: 28
-    }
-  }, React.createElement(SectionTitle, {
-    accent: "#4ECDC4"
-  }, "Calendrier des cours"), React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 8
-    }
-  }, tabs.map(t => React.createElement("button", {
-    key: t.id,
-    onClick: () => setTab(t.id),
-    style: {
-      padding: "9px 20px",
-      borderRadius: 20,
-      border: `2px solid ${tab === t.id ? C.ink : C.border}`,
-      background: tab === t.id ? C.ink : C.white,
-      color: tab === t.id ? "white" : C.ink2,
-      fontFamily: "DM Sans",
-      fontSize: 13,
-      fontWeight: 600,
-      cursor: "pointer",
-      transition: "all .2s"
-    }
-  }, t.label)))), React.createElement("div", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 16
-    }
-  }, Object.entries(byCode).map(([code, evs], i) => {
-    const col = sc(code);
-    const name = evs[0].name;
-    const doneCount = evs.filter(e => e.done).length;
-    return React.createElement("div", {
-      key: code,
-      className: `card fade-up-${Math.min(i + 1, 4)}`,
-      style: {
-        background: C.white,
-        borderRadius: 20,
-        padding: "22px 26px",
-        boxShadow: C.shadow,
-        transition: "all .25s ease",
-        borderLeft: `5px solid ${col}`
-      }
-    }, React.createElement("div", {
-      style: {
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        marginBottom: 16,
-        flexWrap: "wrap",
-        gap: 8
-      }
-    }, React.createElement("div", {
-      style: {
-        display: "flex",
-        alignItems: "center",
-        gap: 12
-      }
-    }, React.createElement("div", {
-      style: {
-        width: 44,
-        height: 44,
-        borderRadius: 12,
-        background: col + "20",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        fontSize: 20,
-        fontWeight: 900,
-        color: col,
-        fontFamily: "Playfair Display"
-      }
-    }, code), React.createElement("div", null, React.createElement("div", {
-      style: {
-        fontFamily: "Playfair Display",
-        fontSize: 18,
-        fontWeight: 700,
-        color: C.ink
-      }
-    }, name), React.createElement("div", {
-      style: {
-        fontSize: 11,
-        color: C.ink3,
-        fontFamily: "DM Sans",
-        marginTop: 2
-      }
-    }, doneCount, "/", evs.length, " séances réalisées"))), React.createElement("div", {
-      style: {
-        display: "flex",
-        gap: 6,
-        alignItems: "center"
-      }
-    }, React.createElement("div", {
-      style: {
-        height: 8,
-        width: 80,
-        borderRadius: 4,
-        background: col + "22",
-        overflow: "hidden"
-      }
-    }, React.createElement("div", {
-      style: {
-        width: `${evs.length > 0 ? doneCount / evs.length * 100 : 0}%`,
-        height: "100%",
-        background: col,
-        borderRadius: 4
-      }
-    })), React.createElement("span", {
-      style: {
-        fontSize: 12,
-        fontWeight: 700,
-        color: col,
-        fontFamily: "DM Sans"
-      }
-    }, evs.length > 0 ? Math.round(doneCount / evs.length * 100) : 0, "%"))), React.createElement("div", {
-      style: {
-        display: "flex",
-        flexWrap: "wrap",
-        gap: 8
-      }
-    }, evs.map((e, j) => React.createElement("div", {
-      key: j,
-      style: {
-        padding: "8px 14px",
-        borderRadius: 10,
-        background: e.done ? col + "15" : C.bg,
-        border: `1.5px solid ${e.done ? col + "60" : C.border}`,
-        fontFamily: "DM Sans",
-        fontSize: 12
-      }
-    }, React.createElement("span", {
-      style: {
-        fontWeight: 600,
-        color: e.done ? col : C.ink
-      }
-    }, e.date), React.createElement("span", {
-      style: {
-        color: C.ink3,
-        marginLeft: 6
-      }
-    }, e.time), e.done && React.createElement("span", {
-      style: {
-        marginLeft: 6,
-        color: col
-      }
-    }, "✓")))));
-  }), courses.length === 0 && React.createElement("p", {
-    style: {
-      color: C.ink3,
-      textAlign: "center",
-      padding: 40,
-      fontFamily: "DM Sans"
-    }
-  }, "Aucun cours pour cette période.")));
-}
-function PageAnalyse({
-  data
-}) {
-  const serie = data.finMensuel || [];
-  const cats = data.finCategories || [];
-  const typeDe = {};
-  cats.forEach(c => {
-    typeDe[c.nom] = c.type;
-  });
-  const [selY, setSelY] = useState(null);
-  const [zoom, setZoom] = useState(null);
-  if (serie.length === 0) {
-    return React.createElement("div", {
-      style: {
-        padding: "40px 28px",
-        maxWidth: 980,
-        margin: "0 auto",
-        textAlign: "center",
-        color: C.ink3,
-        fontFamily: "DM Sans",
-        lineHeight: 1.7
-      }
-    }, "Aucune donnée à analyser pour l'instant.", React.createElement("br", null), "Saisis un mois dans ", React.createElement("strong", null, "Situation"), ", ou importe ton historique depuis Google\xA0Sheets (menu ", React.createElement("strong", null, "⚙️ Finances → Importer l'historique"), ").");
-  }
-  const totRev = serie.reduce((a, r) => a + r.revenus, 0);
-  const totDep = serie.reduce((a, r) => a + r.depenses, 0);
-  const moisAvecFlux = serie.filter(r => r.revenus > 0 || r.depenses > 0);
-  const soldeMoyen = moisAvecFlux.length ? (totRev - totDep) / moisAvecFlux.length : 0;
-  const avecPat = serie.filter(r => r.patrimoine > 0);
-  const patActuel = avecPat.length ? avecPat[avecPat.length - 1].patrimoine : 0;
-  const patPrec = avecPat.length > 1 ? avecPat[avecPat.length - 2].patrimoine : null;
-  const varPat = patPrec && patPrec > 0 ? (patActuel - patPrec) / patPrec * 100 : null;
-  const parAnnee = {};
-  serie.forEach(r => {
-    if (!parAnnee[r.annee]) parAnnee[r.annee] = {
-      revenus: 0,
-      depenses: 0,
-      mois: 0,
-      patrimoine: 0
-    };
-    parAnnee[r.annee].revenus += r.revenus;
-    parAnnee[r.annee].depenses += r.depenses;
-    if (r.revenus > 0 || r.depenses > 0) parAnnee[r.annee].mois += 1;
-    if (r.patrimoine > 0) parAnnee[r.annee].patrimoine = r.patrimoine;
-  });
-  const annees = Object.keys(parAnnee).map(Number).sort((a, b) => a - b);
-  const anneeRep = selY || (annees.length ? annees[annees.length - 1] : null);
-  const repart = {};
-  serie.filter(r => r.annee === anneeRep).forEach(r => {
-    Object.keys(r.parCat).forEach(k => {
-      if (typeDe[k] === 'depense') return;
-      repart[k] = (repart[k] || 0) + r.parCat[k];
-    });
-  });
-  const PALETTE = ['#45B7D1', '#FF6B6B', '#FECA57', '#96CEB4', '#A78BFA', '#FB923C', '#4ECDC4', '#F472B6'];
-  const partsRep = Object.keys(repart).map((k, i) => ({
-    nom: k,
-    value: repart[k],
-    color: PALETTE[i % PALETTE.length]
-  })).filter(p => p.value > 0).sort((a, b) => b.value - a.value);
-  const totRep = partsRep.reduce((a, p) => a + p.value, 0);
-  function donut(parts, size) {
-    const tot = parts.reduce((a, p) => a + p.value, 0);
-    if (tot <= 0) return React.createElement("div", {
-      style: {
-        color: C.ink3,
-        fontSize: 12,
-        fontFamily: "DM Sans"
-      }
-    }, "Aucune donnée");
-    const R = size / 2,
-      r = R * 0.62,
-      cx = R,
-      cy = R;
-    let angle = -Math.PI / 2;
-    const arcs = parts.map(p => {
-      const frac = p.value / tot,
-        a0 = angle,
-        a1 = angle + frac * 2 * Math.PI;
-      angle = a1;
-      const large = frac > 0.5 ? 1 : 0;
-      const x0 = cx + R * Math.cos(a0),
-        y0 = cy + R * Math.sin(a0);
-      const x1 = cx + R * Math.cos(a1),
-        y1 = cy + R * Math.sin(a1);
-      const xi1 = cx + r * Math.cos(a1),
-        yi1 = cy + r * Math.sin(a1);
-      const xi0 = cx + r * Math.cos(a0),
-        yi0 = cy + r * Math.sin(a0);
-      return {
-        d: `M${x0},${y0} A${R},${R} 0 ${large} 1 ${x1},${y1} L${xi1},${yi1} A${r},${r} 0 ${large} 0 ${xi0},${yi0} Z`,
-        color: p.color
-      };
-    });
-    return React.createElement("svg", {
-      viewBox: `0 0 ${size} ${size}`,
-      style: {
-        width: size,
-        height: size,
-        flexShrink: 0
-      }
-    }, arcs.map((a, i) => React.createElement("path", {
-      key: i,
-      d: a.d,
-      fill: a.color
-    })), React.createElement("circle", {
-      cx: cx,
-      cy: cy,
-      r: r - 1,
-      fill: C.white
-    }), React.createElement("text", {
-      x: cx,
-      y: cy - 4,
-      textAnchor: "middle",
-      fontSize: 11,
-      fill: C.ink3,
-      fontFamily: "DM Sans"
-    }, "Total"), React.createElement("text", {
-      x: cx,
-      y: cy + 14,
-      textAnchor: "middle",
-      fontSize: 14,
-      fontWeight: "700",
-      fill: C.ink,
-      fontFamily: "Playfair Display"
-    }, Math.round(tot), "€"));
-  }
-  function courbe(series, grand, cle) {
-    const W = 820,
-      H = grand ? 380 : 190;
-    const P = {
-      t: 18,
-      r: 16,
-      b: grand ? 48 : 30,
-      l: grand ? 58 : 48
-    };
-    const iW = W - P.l - P.r,
-      iH = H - P.t - P.b;
-    const n = serie.length;
-    let maxV = 100;
-    series.forEach(s => serie.forEach(r => {
-      if (r[s.champ] > maxV) maxV = r[s.champ];
-    }));
-    const X = i => P.l + (n <= 1 ? iW / 2 : i * iW / (n - 1));
-    const Y = v => P.t + iH * (1 - v / maxV);
-    const pas = grand ? 1 : Math.max(1, Math.ceil(n / 8));
-    return React.createElement("svg", {
-      viewBox: `0 0 ${W} ${H}`,
-      style: {
-        width: "100%",
-        fontFamily: "DM Sans"
-      }
-    }, React.createElement("defs", null, series.map((s, si) => React.createElement("linearGradient", {
-      key: si,
-      id: `g-${cle}-${si}${grand ? '-b' : ''}`,
-      x1: "0",
-      y1: "0",
-      x2: "0",
-      y2: "1"
-    }, React.createElement("stop", {
-      offset: "0%",
-      stopColor: s.couleur,
-      stopOpacity: "0.22"
-    }), React.createElement("stop", {
-      offset: "100%",
-      stopColor: s.couleur,
-      stopOpacity: "0"
-    })))), [0, .25, .5, .75, 1].map((f, i) => {
-      const y = P.t + iH * (1 - f);
-      return React.createElement("g", {
-        key: i
-      }, React.createElement("line", {
-        x1: P.l,
-        x2: P.l + iW,
-        y1: y,
-        y2: y,
-        stroke: "#f0f0f8",
-        strokeWidth: 1
-      }), React.createElement("text", {
-        x: P.l - 6,
-        y: y + 4,
-        textAnchor: "end",
-        fontSize: grand ? 11 : 9,
-        fill: C.ink3
-      }, Math.round(maxV * f), "€"));
-    }), series.map((s, si) => {
-      const pts = serie.map((r, i) => ({
-        x: X(i),
-        y: Y(r[s.champ]),
-        v: r[s.champ]
-      }));
-      const path = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
-      const aire = `${path} L${pts[pts.length - 1].x.toFixed(1)},${P.t + iH} L${pts[0].x.toFixed(1)},${P.t + iH} Z`;
-      return React.createElement("g", {
-        key: si
-      }, series.length === 1 && React.createElement("path", {
-        d: aire,
-        fill: `url(#g-${cle}-${si}${grand ? '-b' : ''})`
-      }), React.createElement("path", {
-        d: path,
-        fill: "none",
-        stroke: s.couleur,
-        strokeWidth: grand ? 3 : 2.4,
-        strokeLinejoin: "round"
-      }), pts.map((p, i) => {
-        const dernier = i === pts.length - 1;
-        return React.createElement("g", {
-          key: i
-        }, React.createElement("circle", {
-          cx: p.x,
-          cy: p.y,
-          r: dernier ? grand ? 6 : 4.5 : grand ? 4 : 2.6,
-          fill: s.couleur
-        }), grand && p.v > 0 && React.createElement("text", {
-          x: p.x,
-          y: p.y - 11,
-          textAnchor: "middle",
-          fontSize: 9,
-          fill: s.couleur,
-          fontWeight: dernier ? 700 : 500
-        }, Math.round(p.v), "€"));
-      }));
-    }), serie.map((r, i) => (i === 0 || i === n - 1 || i % pas === 0) && React.createElement("text", {
-      key: i,
-      x: X(i),
-      y: P.t + iH + (grand ? 20 : 16),
-      textAnchor: "middle",
-      fontSize: grand ? 9 : 7.5,
-      fill: i === n - 1 ? C.ink : C.ink3,
-      fontWeight: i === n - 1 ? 700 : 400,
-      transform: grand ? `rotate(-35 ${X(i)} ${P.t + iH + 20})` : undefined
-    }, r.label)));
-  }
-  const SERIE_FLUX = [{
-    champ: 'revenus',
-    couleur: '#2E8B57',
-    nom: 'Revenus'
-  }, {
-    champ: 'depenses',
-    couleur: '#E04848',
-    nom: 'Dépenses'
-  }];
-  const SERIE_PAT = [{
-    champ: 'patrimoine',
-    couleur: '#1F7A99',
-    nom: 'Patrimoine'
-  }];
-  const titreZoom = zoom === 'flux' ? 'Revenus et dépenses' : 'Évolution du patrimoine';
-  return React.createElement("div", {
-    style: {
-      padding: "32px 28px",
-      maxWidth: 980,
-      margin: "0 auto"
-    }
-  }, zoom && React.createElement("div", {
-    onClick: () => setZoom(null),
-    style: {
-      position: "fixed",
-      inset: 0,
-      background: "rgba(0,0,0,0.7)",
-      zIndex: 1000,
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      padding: 20
-    }
-  }, React.createElement("div", {
-    onClick: e => e.stopPropagation(),
-    style: {
-      background: C.white,
-      borderRadius: 24,
-      padding: "28px 24px",
-      width: "100%",
-      maxWidth: 1100,
-      maxHeight: "90vh",
-      overflow: "auto",
-      boxShadow: "0 24px 80px rgba(0,0,0,0.3)"
-    }
-  }, React.createElement("div", {
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center",
-      marginBottom: 16
-    }
-  }, React.createElement(SectionTitle, {
-    accent: zoom === 'flux' ? '#2E8B57' : '#1F7A99'
-  }, titreZoom), React.createElement("button", {
-    onClick: () => setZoom(null),
-    style: {
-      border: "none",
-      background: C.bg,
-      borderRadius: 8,
-      width: 36,
-      height: 36,
-      fontSize: 18,
-      cursor: "pointer",
-      color: C.ink2,
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center"
-    }
-  }, "✕")), zoom === 'flux' ? courbe(SERIE_FLUX, true, 'flux') : courbe(SERIE_PAT, true, 'pat'))), React.createElement("div", {
-    className: "fade-up",
-    style: {
-      display: "grid",
-      gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))",
-      gap: 14,
-      marginBottom: 24
-    }
-  }, React.createElement(KpiCard, {
-    label: "Patrimoine actuel",
-    value: fmtM(patActuel),
-    color: "#1F7A99",
-    sub: varPat !== null ? `${varPat >= 0 ? '▲' : '▼'} ${Math.abs(varPat).toFixed(1)}% vs mois précédent` : null
-  }), React.createElement(KpiCard, {
-    label: "Solde moyen / mois",
-    value: fmtM(soldeMoyen),
-    color: soldeMoyen >= 0 ? "#2E8B57" : "#E04848",
-    delay: "-2"
-  }), React.createElement(KpiCard, {
-    label: "Revenus cumulés",
-    value: fmtM(totRev),
-    color: "#45B7D1",
-    delay: "-3"
-  }), React.createElement(KpiCard, {
-    label: "Dépenses cumulées",
-    value: fmtM(totDep),
-    color: "#E04848",
-    delay: "-4"
-  })), React.createElement("div", {
-    className: "fade-up-2",
-    style: {
-      background: C.white,
-      borderRadius: 20,
-      padding: "24px 28px",
-      boxShadow: C.shadow,
-      marginBottom: 20
-    }
-  }, React.createElement("div", {
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "flex-start",
-      marginBottom: 8
-    }
-  }, React.createElement(SectionTitle, {
-    accent: "#2E8B57"
-  }, "Revenus et dépenses"), React.createElement("button", {
-    onClick: () => setZoom('flux'),
-    style: {
-      border: `1px solid ${C.border}`,
-      background: C.bg,
-      borderRadius: 8,
-      padding: "5px 10px",
-      fontSize: 12,
-      cursor: "pointer",
-      color: C.ink2,
-      fontFamily: "DM Sans",
-      flexShrink: 0
-    }
-  }, "⛶ Agrandir")), React.createElement("div", {
-    onClick: () => setZoom('flux'),
-    style: {
-      overflowX: "auto",
-      cursor: "pointer"
-    }
-  }, courbe(SERIE_FLUX, false, 'flux')), React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 16,
-      marginTop: 10,
-      paddingLeft: 4
-    }
-  }, SERIE_FLUX.map((s, i) => React.createElement("span", {
-    key: i,
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 6,
-      fontSize: 11,
-      color: C.ink2,
-      fontFamily: "DM Sans"
-    }
-  }, React.createElement("span", {
-    style: {
-      width: 10,
-      height: 10,
-      borderRadius: 3,
-      background: s.couleur
-    }
-  }), s.nom)))), React.createElement("div", {
-    className: "fade-up-2",
-    style: {
-      background: C.white,
-      borderRadius: 20,
-      padding: "24px 28px",
-      boxShadow: C.shadow,
-      marginBottom: 20
-    }
-  }, React.createElement("div", {
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "flex-start",
-      marginBottom: 8
-    }
-  }, React.createElement(SectionTitle, {
-    accent: "#1F7A99"
-  }, "Évolution du patrimoine"), React.createElement("button", {
-    onClick: () => setZoom('patrimoine'),
-    style: {
-      border: `1px solid ${C.border}`,
-      background: C.bg,
-      borderRadius: 8,
-      padding: "5px 10px",
-      fontSize: 12,
-      cursor: "pointer",
-      color: C.ink2,
-      fontFamily: "DM Sans",
-      flexShrink: 0
-    }
-  }, "⛶ Agrandir")), avecPat.length === 0 ? React.createElement("div", {
-    style: {
-      fontSize: 13,
-      color: C.ink3,
-      fontFamily: "DM Sans",
-      padding: "16px 0"
-    }
-  }, "Saisis tes soldes d'épargne dans ", React.createElement("strong", null, "Situation"), " pour voir la courbe apparaître.") : React.createElement("div", {
-    onClick: () => setZoom('patrimoine'),
-    style: {
-      overflowX: "auto",
-      cursor: "pointer"
-    }
-  }, courbe(SERIE_PAT, false, 'pat'))), React.createElement("div", {
-    className: "fade-up-3",
-    style: {
-      background: C.white,
-      borderRadius: 20,
-      padding: "24px 28px",
-      boxShadow: C.shadow,
-      marginBottom: 20
-    }
-  }, React.createElement(SectionTitle, {
-    accent: "#96CEB4"
-  }, "Comparaison par année"), React.createElement("div", {
-    style: {
-      overflowX: "auto"
-    }
-  }, React.createElement("table", {
-    style: {
-      width: "100%",
-      borderCollapse: "separate",
-      borderSpacing: "0 4px",
-      fontFamily: "DM Sans",
-      fontSize: 12
-    }
-  }, React.createElement("thead", null, React.createElement("tr", null, ["Année", "Revenus", "Dépenses", "Solde", "Moy./mois", "Patrimoine"].map(h => React.createElement("th", {
-    key: h,
-    style: {
-      textAlign: "left",
-      padding: "8px 12px",
-      fontSize: 10,
-      fontWeight: 600,
-      color: C.ink3,
-      textTransform: "uppercase",
-      letterSpacing: ".08em",
-      borderBottom: `2px solid ${C.border}`
-    }
-  }, h)))), React.createElement("tbody", null, annees.map((y, i) => {
-    const a = parAnnee[y];
-    const solde = a.revenus - a.depenses;
-    const moy = a.mois > 0 ? solde / a.mois : 0;
-    return React.createElement("tr", {
-      key: i,
-      style: {
-        background: i % 2 === 0 ? "#F4F7FA" : C.white
-      }
-    }, React.createElement("td", {
-      style: {
-        padding: "10px 12px",
-        fontWeight: 700,
-        color: C.ink
-      }
-    }, y), React.createElement("td", {
-      style: {
-        padding: "10px 12px",
-        color: "#2E8B57",
-        fontWeight: 500
-      }
-    }, fmtM(a.revenus)), React.createElement("td", {
-      style: {
-        padding: "10px 12px",
-        color: "#E04848",
-        fontWeight: 500
-      }
-    }, a.depenses > 0 ? fmtM(a.depenses) : "—"), React.createElement("td", {
-      style: {
-        padding: "10px 12px"
-      }
-    }, React.createElement("span", {
-      style: {
-        background: solde >= 0 ? "#2E8B5718" : "#E0484818",
-        color: solde >= 0 ? "#2E8B57" : "#E04848",
-        padding: "4px 10px",
-        borderRadius: 6,
-        fontWeight: 700
-      }
-    }, fmtM(solde))), React.createElement("td", {
-      style: {
-        padding: "10px 12px",
-        color: C.ink2,
-        fontWeight: 600
-      }
-    }, fmtM(moy)), React.createElement("td", {
-      style: {
-        padding: "10px 12px",
-        color: "#1F7A99",
-        fontWeight: 500
-      }
-    }, a.patrimoine > 0 ? fmtM(a.patrimoine) : "—"));
-  }))))), React.createElement("div", {
-    className: "fade-up-3",
-    style: {
-      background: C.white,
-      borderRadius: 20,
-      padding: "24px 28px",
-      boxShadow: C.shadow
-    }
-  }, React.createElement("div", {
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center",
-      marginBottom: 16,
-      flexWrap: "wrap",
-      gap: 10
-    }
-  }, React.createElement(SectionTitle, {
-    accent: "#FECA57"
-  }, "Répartition des revenus"), React.createElement("select", {
-    value: anneeRep || '',
-    onChange: e => setSelY(+e.target.value),
-    style: {
-      padding: "8px 14px",
-      borderRadius: 10,
-      border: `2px solid ${C.border}`,
-      background: C.bg,
-      color: C.ink,
-      fontFamily: "DM Sans",
-      fontSize: 14,
-      fontWeight: 700,
-      cursor: "pointer",
-      outline: "none"
-    }
-  }, annees.map(y => React.createElement("option", {
-    key: y,
-    value: y
-  }, y)))), partsRep.length === 0 ? React.createElement("div", {
-    style: {
-      fontSize: 13,
-      color: C.ink3,
-      fontFamily: "DM Sans"
-    }
-  }, "Aucun revenu enregistré pour ", anneeRep, ".") : React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 32,
-      alignItems: "center",
-      flexWrap: "wrap",
-      justifyContent: "center"
-    }
-  }, donut(partsRep, 170), React.createElement("div", {
-    style: {
-      flex: 1,
-      minWidth: 220
-    }
-  }, partsRep.map((p, i) => {
-    const pct = totRep > 0 ? p.value / totRep * 100 : 0;
-    return React.createElement("div", {
-      key: i,
-      style: {
-        marginBottom: 13
-      }
-    }, React.createElement("div", {
-      style: {
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        marginBottom: 4
-      }
-    }, React.createElement("span", {
-      style: {
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        fontSize: 13,
-        color: C.ink,
-        fontWeight: 500,
-        fontFamily: "DM Sans"
-      }
-    }, React.createElement("span", {
-      style: {
-        width: 12,
-        height: 12,
-        borderRadius: 3,
-        background: p.color,
-        flexShrink: 0
-      }
-    }), p.nom), React.createElement("span", {
-      style: {
-        fontSize: 13,
-        fontWeight: 700,
-        color: C.ink,
-        fontFamily: "DM Sans"
-      }
-    }, fmtM(p.value))), React.createElement("div", {
-      style: {
-        height: 8,
-        background: "#f0f0f5",
-        borderRadius: 4,
-        overflow: "hidden"
-      }
-    }, React.createElement("div", {
-      style: {
-        width: `${pct}%`,
-        height: "100%",
-        background: p.color,
-        borderRadius: 4
-      }
-    })), React.createElement("div", {
-      style: {
-        fontSize: 10,
-        color: C.ink3,
-        marginTop: 2,
-        textAlign: "right",
-        fontFamily: "DM Sans"
-      }
-    }, pct.toFixed(1), "%"));
-  })))));
-}
-function PageLiens() {
-  const liens = [{
-    titre: "Nóminas",
-    desc: "Feuille de suivi des salaires, cours et revenus",
-    url: "https://docs.google.com/spreadsheets/d/1qFAGMnfFkznxkckuF5eGgY0XSo9qWAGao1vi_e5rkfw/edit",
-    color: "#45B7D1",
-    icon: "📊"
-  }, {
-    titre: "Impôts",
-    desc: "Feuille de gestion fiscale",
-    url: "https://docs.google.com/spreadsheets/d/1jThZTb0tiJE__FGkaNk9M_Qflk4QBk3tpwCq7f7z5gg/edit",
-    color: "#FF6B6B",
-    icon: "🧾"
-  }];
-  return React.createElement("div", {
-    style: {
-      padding: "32px 28px",
-      maxWidth: 980,
-      margin: "0 auto"
-    }
-  }, React.createElement("div", {
-    className: "fade-up",
-    style: {
-      marginBottom: 24
-    }
-  }, React.createElement(SectionTitle, {
-    accent: "#96CEB4"
-  }, "Mes documents")), React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))",
-      gap: 16
-    }
-  }, liens.map((l, i) => React.createElement("a", {
-    key: i,
-    href: l.url,
-    target: "_blank",
-    rel: "noopener noreferrer",
-    className: `card fade-up${i > 0 ? "-2" : ""}`,
-    style: {
-      display: "block",
-      textDecoration: "none",
-      background: C.white,
-      borderRadius: 20,
-      padding: "26px 28px",
-      boxShadow: C.shadow,
-      transition: "all .25s ease",
-      borderLeft: `5px solid ${l.color}`
-    }
-  }, React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 14,
-      marginBottom: 12
-    }
-  }, React.createElement("div", {
-    style: {
-      width: 52,
-      height: 52,
-      borderRadius: 14,
-      flexShrink: 0,
-      background: l.color + "18",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      fontSize: 26
-    }
-  }, l.icon), React.createElement("div", null, React.createElement("div", {
-    style: {
-      fontFamily: "Playfair Display",
-      fontSize: 20,
-      fontWeight: 700,
-      color: C.ink,
-      lineHeight: 1.1
-    }
-  }, l.titre), React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: C.ink3,
-      fontFamily: "DM Sans",
-      marginTop: 3
-    }
-  }, l.desc))), React.createElement("div", {
-    style: {
-      display: "inline-flex",
-      alignItems: "center",
-      gap: 6,
-      color: l.color,
-      fontFamily: "DM Sans",
-      fontSize: 13,
-      fontWeight: 600,
-      marginTop: 4
-    }
-  }, "Ouvrir la feuille", React.createElement("span", {
-    style: {
-      fontSize: 16,
-      lineHeight: 1
-    }
-  }, "→"))))));
-}
-function EditeurMois({
-  data,
+
+/* ---------- Mois ---------- */
+
+function PageMois({
+  d,
   mois,
-  onSaved,
-  compact,
-  onDirty
+  changerMois,
+  dirty,
+  setDirty,
+  recharger,
+  notifier
 }) {
-  const cats = (data.finCategories || []).filter(c => c.actif);
-  const revenus = cats.filter(c => c.type === 'revenu');
-  const depenses = cats.filter(c => c.type === 'depense');
+  const actives = d.cats.filter(c => c.actif);
+  const revenus = actives.filter(c => c.type === 'revenu');
+  const depenses = actives.filter(c => c.type === 'depense');
   const [vals, setVals] = useState({});
   const [sold, setSold] = useState({});
+  const [reconduit, setReconduit] = useState(null);
+  const [edit, setEdit] = useState(null);
+  const [ajout, setAjout] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [msg, setMsg] = useState(null);
-  const [nouvelle, setNouvelle] = useState('');
-  const [typeNouv, setTypeNouv] = useState('depense');
-  const [reconduitDe, setReconduitDe] = useState(null);
-
-  // Dernier mois ANTÉRIEUR contenant des données, pour la reconduction
-  function moisSourceAvant(cible) {
-    const arch = data.finArchives || [];
-    const sol = data.finSoldes || [];
-    const dispo = {};
-    arch.forEach(a => {
-      if (a.mois < cible) dispo[a.mois] = true;
-    });
-    sol.forEach(x => {
-      if (x.mois < cible) dispo[x.mois] = true;
-    });
-    const liste = Object.keys(dispo).sort();
-    return liste.length ? liste[liste.length - 1] : null;
-  }
-
-  // Remplit le formulaire à partir d'un mois donné (sans rien enregistrer)
-  function chargerDepuis(source, marquer) {
+  const etat = useRef({
+    mois: null,
+    dirty: false
+  });
+  etat.current.dirty = dirty;
+  const aDesDonnees = !!d.parMois[mois];
+  const source = dernierAvant(d, mois);
+  function valeursDe(m) {
     const v = {};
-    cats.forEach(c => {
+    actives.forEach(c => {
       v[c.nom] = '';
     });
-    (data.finArchives || []).filter(a => a.mois === source).forEach(a => {
-      v[a.categorie] = a.montant;
+    d.arch.filter(a => a.mois === m).forEach(a => {
+      if (a.categorie in v) v[a.categorie] = a.montant;
     });
     const s = {};
-    FIN_COMPTES.forEach(c => {
+    COMPTES.forEach(c => {
       s[c] = '';
     });
-    (data.finSoldes || []).filter(x => x.mois === source).forEach(x => {
-      s[x.compte] = x.montant;
+    d.sold.filter(x => x.mois === m).forEach(x => {
+      if (x.compte in s) s[x.compte] = x.montant;
+    });
+    return {
+      v,
+      s
+    };
+  }
+  useEffect(() => {
+    const memeMois = etat.current.mois === mois;
+    etat.current.mois = mois;
+    if (memeMois && etat.current.dirty) {
+      // Données rafraîchies pendant une saisie : on garde la saisie, on ajoute les nouvelles lignes
+      setVals(old => {
+        const n = {};
+        actives.forEach(c => {
+          n[c.nom] = c.nom in old ? old[c.nom] : '';
+        });
+        return n;
+      });
+      return;
+    }
+    if (aDesDonnees || !source) {
+      const r = valeursDe(mois);
+      setVals(r.v);
+      setSold(r.s);
+      setReconduit(null);
+    } else {
+      const r = valeursDe(source);
+      setVals(r.v);
+      setSold(r.s);
+      setReconduit(source);
+    }
+  }, [mois, d]);
+  const totRev = revenus.reduce((a, c) => a + num(vals[c.nom]), 0);
+  const totDep = depenses.reduce((a, c) => a + num(vals[c.nom]), 0);
+  const soldesRemplis = COMPTES.some(c => !vide(sold[c]));
+  const patrimoine = COMPTES.reduce((a, c) => a + num(sold[c]), 0);
+  function repartirDeZero() {
+    const v = {};
+    actives.forEach(c => {
+      v[c.nom] = '';
+    });
+    const s = {};
+    COMPTES.forEach(c => {
+      s[c] = '';
     });
     setVals(v);
     setSold(s);
-    setReconduitDe(marquer ? source : null);
-    if (marquer && onDirty) onDirty(true);
+    setReconduit(null);
+    setDirty(true);
   }
-
-  useEffect(() => {
-    const aDesDonnees = (data.finArchives || []).some(a => a.mois === mois) || (data.finSoldes || []).some(x => x.mois === mois);
-    if (aDesDonnees) {
-      chargerDepuis(mois, false);
-    } else {
-      // Mois vierge : on reconduit le dernier mois renseigné
-      const source = moisSourceAvant(mois);
-      if (source) {
-        chargerDepuis(source, true);
-      } else {
-        chargerDepuis(mois, false);
-      }
+  function reference(e) {
+    if (!source) return null;
+    if (e.kind === 'compte') {
+      const x = d.sold.find(s => s.mois === source && s.compte === e.nom);
+      return x ? x.montant : null;
     }
-    setMsg(null);
-    if (!((data.finArchives || []).some(a => a.mois === mois))) {
-      // onDirty géré dans chargerDepuis
-    } else if (onDirty) onDirty(false);
-  }, [mois, data]);
-  const totRev = revenus.reduce((a, c) => a + num(vals[c.nom]), 0);
-  const totDep = depenses.reduce((a, c) => a + num(vals[c.nom]), 0);
-  const solde = totRev - totDep;
-  const patrimoine = FIN_COMPTES.reduce((a, c) => a + num(sold[c]), 0);
-  async function sauvegarder() {
+    return d.parMois[source] && d.parMois[source].cats[e.nom] || null;
+  }
+  function valider(valeur) {
+    if (edit.kind === 'compte') setSold(s => Object.assign({}, s, {
+      [edit.nom]: valeur
+    }));else setVals(v => Object.assign({}, v, {
+      [edit.nom]: valeur
+    }));
+    setDirty(true);
+    setEdit(null);
+  }
+  async function enregistrer() {
     setSaving(true);
-    setMsg(null);
     try {
+      const lignes = actives.map(c => ({
+        categorie: c.nom,
+        montant: num(vals[c.nom])
+      }));
+      // Conserve les montants déjà enregistrés des lignes masquées ou inconnues
+      d.arch.filter(a => a.mois === mois && !actives.some(c => c.nom === a.categorie)).forEach(a => lignes.push({
+        categorie: a.categorie,
+        montant: a.montant
+      }));
       await apiPost('saveArchives', {
         mois: mois,
-        lignes: Object.keys(vals).map(k => ({
-          categorie: k,
-          montant: num(vals[k])
-        }))
+        lignes: lignes
       });
       await apiPost('saveSoldes', {
         mois: mois,
-        soldes: FIN_COMPTES.map(c => ({
+        soldes: COMPTES.filter(c => !vide(sold[c])).map(c => ({
           compte: c,
           montant: num(sold[c])
         }))
       });
-      setMsg({
-        ok: true,
-        txt: 'Enregistré'
-      });
-      setReconduitDe(null);
-      if (onDirty) onDirty(false);
-      if (onSaved) await onSaved();
+      setDirty(false);
+      etat.current.dirty = false;
+      setReconduit(null);
+      notifier(capital(moisLong(mois)) + ' enregistré');
+      await recharger(true);
     } catch (e) {
-      setMsg({
-        ok: false,
-        txt: e.message
-      });
+      notifier('Échec de l\'enregistrement : ' + e.message, true);
     } finally {
       setSaving(false);
     }
   }
-  async function supprimerCategorie(nom) {
-    const toutes = data.finCategories || [];
-    const aHistorique = (data.finArchives || []).some(a => a.categorie === nom && a.montant !== 0);
-    const question = aHistorique ? 'Retirer « ' + nom + ' » du formulaire ?\n\nLes montants déjà enregistrés resteront visibles dans les Archives.' : 'Supprimer définitivement « ' + nom + ' » ?';
-    if (!window.confirm(question)) return;
+  async function sauverCategories(liste, msg) {
     setSaving(true);
-    setMsg(null);
     try {
-      const liste = aHistorique ? toutes.map(c => c.nom === nom ? Object.assign({}, c, {
-        actif: false
-      }) : c) : toutes.filter(c => c.nom !== nom);
       await apiPost('saveCategories', {
         categories: liste
       });
-      setMsg({
-        ok: true,
-        txt: aHistorique ? 'Ligne retirée, historique conservé' : 'Ligne supprimée'
-      });
-      if (onSaved) await onSaved();
+      notifier(msg);
+      await recharger(true);
     } catch (e) {
-      setMsg({
-        ok: false,
-        txt: e.message
-      });
+      notifier('Échec : ' + e.message, true);
     } finally {
       setSaving(false);
     }
   }
-  async function restaurerCategorie(nom) {
-    setSaving(true);
-    setMsg(null);
-    try {
-      const liste = (data.finCategories || []).map(c => c.nom === nom ? Object.assign({}, c, {
+  function masquer(nom) {
+    const aHisto = d.arch.some(a => a.categorie === nom && a.montant !== 0);
+    const q = aHisto ? 'Masquer « ' + nom + ' » ?\n\nLes montants déjà enregistrés restent dans l\'historique. Tu pourras la réafficher depuis le menu.' : 'Supprimer « ' + nom + ' » ? Elle n\'a encore aucun montant enregistré.';
+    if (!window.confirm(q)) return;
+    setEdit(null);
+    const liste = aHisto ? d.cats.map(c => c.nom === nom ? Object.assign({}, c, {
+      actif: false
+    }) : c) : d.cats.filter(c => c.nom !== nom);
+    sauverCategories(liste, aHisto ? 'Ligne masquée' : 'Ligne supprimée');
+  }
+  function ajouter(nom, type) {
+    const n = nom.trim();
+    if (!n) return;
+    if (d.cats.some(c => c.nom.toLowerCase() === n.toLowerCase())) {
+      const ex = d.cats.find(c => c.nom.toLowerCase() === n.toLowerCase());
+      if (ex.actif) {
+        notifier('Cette ligne existe déjà', true);
+        return;
+      }
+      setAjout(null);
+      sauverCategories(d.cats.map(c => c === ex ? Object.assign({}, c, {
         actif: true
-      }) : c);
-      await apiPost('saveCategories', {
-        categories: liste
-      });
-      setMsg({
-        ok: true,
-        txt: 'Ligne restaurée'
-      });
-      if (onSaved) await onSaved();
-    } catch (e) {
-      setMsg({
-        ok: false,
-        txt: e.message
-      });
-    } finally {
-      setSaving(false);
-    }
-  }
-  async function ajouterCategorie() {
-    const nom = nouvelle.trim();
-    if (!nom) return;
-    if (cats.some(c => c.nom.toLowerCase() === nom.toLowerCase())) {
-      setMsg({
-        ok: false,
-        txt: 'Cette catégorie existe déjà'
-      });
+      }) : c), 'Ligne réaffichée');
       return;
     }
-    setSaving(true);
-    setMsg(null);
-    try {
-      const liste = (data.finCategories || []).concat([{
-        nom: nom,
-        type: typeNouv,
-        actif: true
-      }]);
-      await apiPost('saveCategories', {
-        categories: liste
-      });
-      setNouvelle('');
-      setMsg({
-        ok: true,
-        txt: 'Catégorie ajoutée'
-      });
-      if (onSaved) await onSaved();
-    } catch (e) {
-      setMsg({
-        ok: false,
-        txt: e.message
-      });
-    } finally {
-      setSaving(false);
-    }
+    setAjout(null);
+    sauverCategories(d.cats.concat([{
+      nom: n,
+      type: type,
+      actif: true
+    }]), 'Ligne ajoutée');
   }
-  const colonne = (titre, liste, couleur, total) => React.createElement("div", {
+  const aEnregistrer = dirty || !!reconduit;
+  let etatTxt = 'Aucune donnée',
+    etatCls = '';
+  if (saving) {
+    etatTxt = 'Enregistrement…';
+  } else if (dirty) {
+    etatTxt = 'Brouillon non enregistré';
+    etatCls = 'attente';
+  } else if (reconduit) {
+    etatTxt = 'Pré-rempli, non enregistré';
+    etatCls = 'attente';
+  } else if (aDesDonnees) {
+    etatTxt = 'Enregistré';
+    etatCls = 'ok';
+  }
+  function Rang({
+    key,
+    nom,
+    valeur,
+    couleur,
+    rond,
+    onClick,
+    premier
+  }) {
+    return /*#__PURE__*/React.createElement("button", {
+      key: key,
+      className: "rang",
+      onClick: onClick,
+      style: premier ? {
+        borderTop: 'none'
+      } : null
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "pt",
+      style: {
+        background: couleur,
+        borderRadius: rond ? 5 : 3
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      className: "nom"
+    }, nom), /*#__PURE__*/React.createElement("span", {
+      className: 'mt' + (vide(valeur) ? ' vide' : '')
+    }, vide(valeur) ? '—' : eur(num(valeur))), /*#__PURE__*/React.createElement(Ico, {
+      d: I.droite,
+      size: 18,
+      color: "var(--ink4)"
+    }));
+  }
+  function Section({
+    titre,
+    total,
+    cls,
+    liste,
+    type,
+    couleur
+  }) {
+    return /*#__PURE__*/React.createElement("div", {
+      className: "section"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "section-tete"
+    }, /*#__PURE__*/React.createElement("h2", null, titre), /*#__PURE__*/React.createElement("span", {
+      className: cls
+    }, eur(total))), /*#__PURE__*/React.createElement("div", {
+      className: "liste"
+    }, liste.map((c, i) => Rang({
+      key: c.nom,
+      nom: c.nom,
+      valeur: vals[c.nom],
+      couleur: couleur,
+      premier: i === 0,
+      onClick: () => setEdit({
+        kind: 'cat',
+        nom: c.nom,
+        type: c.type
+      })
+    })), /*#__PURE__*/React.createElement("button", {
+      className: "rang ajout",
+      onClick: () => setAjout(type),
+      style: liste.length ? null : {
+        borderTop: 'none'
+      }
+    }, /*#__PURE__*/React.createElement(Ico, {
+      d: I.plus,
+      size: 18,
+      sw: 2.2
+    }), "Ajouter une ligne")));
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    className: "page avec-barre"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "nav-mois"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => changerMois(ymAjoute(mois, -1)),
+    "aria-label": "Mois précédent"
+  }, /*#__PURE__*/React.createElement(Ico, {
+    d: I.gauche,
+    sw: 2.2
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "centre"
+  }, /*#__PURE__*/React.createElement("h1", null, moisTitre(mois)), /*#__PURE__*/React.createElement("span", {
+    className: 'etat ' + etatCls
+  }, etatTxt)), /*#__PURE__*/React.createElement("button", {
+    onClick: () => changerMois(ymAjoute(mois, 1)),
+    "aria-label": "Mois suivant"
+  }, /*#__PURE__*/React.createElement(Ico, {
+    d: I.droite,
+    sw: 2.2
+  }))), reconduit && /*#__PURE__*/React.createElement("div", {
+    className: "bandeau info"
+  }, /*#__PURE__*/React.createElement(Ico, {
+    d: I.refresh,
+    size: 20
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "txt"
+  }, "Montants reconduits depuis ", /*#__PURE__*/React.createElement("strong", null, moisLong(reconduit)), ". Vérifie-les puis enregistre."), /*#__PURE__*/React.createElement("button", {
+    className: "mini",
+    onClick: repartirDeZero
+  }, "Repartir de zéro")), /*#__PURE__*/React.createElement("div", {
+    className: "carte trio",
     style: {
-      flex: 1,
-      minWidth: 260
+      padding: '14px 16px'
     }
-  }, React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "lib"
+  }, "Revenus"), /*#__PURE__*/React.createElement("div", {
+    className: "val c-rev"
+  }, eur(totRev))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "lib"
+  }, "Dépenses"), /*#__PURE__*/React.createElement("div", {
+    className: "val c-dep"
+  }, eur(totDep))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "lib"
+  }, "Solde"), /*#__PURE__*/React.createElement("div", {
+    className: "val"
+  }, eurSigne(totRev - totDep)))), Section({
+    titre: 'Revenus',
+    total: totRev,
+    cls: 'c-rev',
+    liste: revenus,
+    type: 'revenu',
+    couleur: 'var(--rev)'
+  }), Section({
+    titre: 'Dépenses',
+    total: totDep,
+    cls: 'c-dep',
+    liste: depenses,
+    type: 'depense',
+    couleur: 'var(--dep)'
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "section"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "section-tete"
+  }, /*#__PURE__*/React.createElement("h2", null, "Comptes · fin de mois"), /*#__PURE__*/React.createElement("span", {
     style: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "baseline",
-      marginBottom: 8
+      color: 'var(--barOn)'
     }
-  }, React.createElement("span", {
+  }, soldesRemplis ? eur(patrimoine) : '—')), /*#__PURE__*/React.createElement("div", {
+    className: "liste"
+  }, COMPTES.map((c, i) => Rang({
+    key: c,
+    nom: c,
+    valeur: sold[c],
+    couleur: 'var(--hero)',
+    rond: true,
+    premier: i === 0,
+    onClick: () => setEdit({
+      kind: 'compte',
+      nom: c
+    })
+  })))), /*#__PURE__*/React.createElement("div", {
+    className: "barre-save"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "in"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "bouton",
+    onClick: enregistrer,
+    disabled: saving || !aEnregistrer
+  }, /*#__PURE__*/React.createElement(Ico, {
+    d: saving ? I.refresh : I.check,
+    size: 18,
+    sw: 2.4
+  }), saving ? 'Enregistrement…' : aEnregistrer ? 'Enregistrer ' + moisNom(mois) : capital(moisNom(mois)) + ' enregistré'))), edit && /*#__PURE__*/React.createElement(FeuilleSaisie, {
+    edit: edit,
+    mois: mois,
+    valeur: edit.kind === 'compte' ? sold[edit.nom] : vals[edit.nom],
+    reference: reference(edit),
+    source: source,
+    onClose: () => setEdit(null),
+    onValider: valider,
+    onMasquer: edit.kind === 'cat' ? () => masquer(edit.nom) : null
+  }), ajout && /*#__PURE__*/React.createElement(FeuilleAjout, {
+    type: ajout,
+    onClose: () => setAjout(null),
+    onAjouter: ajouter
+  }));
+}
+function FeuilleSaisie({
+  edit,
+  mois,
+  valeur,
+  reference,
+  source,
+  onClose,
+  onValider,
+  onMasquer
+}) {
+  const [txt, setTxt] = useState(pourSaisie(valeur));
+  const ref = useRef(null);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (ref.current) {
+        ref.current.focus();
+        ref.current.select();
+      }
+    }, 60);
+    return () => clearTimeout(t);
+  }, []);
+  const sous = edit.kind === 'compte' ? 'Solde au ' + finDeMois(mois) + ' ' + mois.slice(0, 4) : (edit.type === 'depense' ? 'Dépense' : 'Revenu') + ' · ' + moisLong(mois);
+  function ok() {
+    onValider(txt.trim() === '' ? '' : txt.trim());
+  }
+  return /*#__PURE__*/React.createElement(Feuille, {
+    onClose: onClose,
+    labelId: "titre-saisie"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ligne-tete",
     style: {
-      fontSize: 11,
-      fontWeight: 700,
-      color: couleur,
-      textTransform: "uppercase",
-      letterSpacing: ".1em",
-      fontFamily: "DM Sans"
+      alignItems: 'flex-start'
     }
-  }, titre), React.createElement("span", {
+  }, /*#__PURE__*/React.createElement("div", {
     style: {
-      fontFamily: "Playfair Display",
-      fontSize: 17,
-      fontWeight: 700,
-      color: couleur
-    }
-  }, fmtM(total))), liste.length === 0 ? React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: C.ink3,
-      fontStyle: "italic",
-      padding: "8px 0"
-    }
-  }, "Aucune ligne") : liste.map((c, i) => React.createElement("div", {
-    key: c.nom,
-    style: {
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between",
-      gap: 10,
-      padding: "7px 0",
-      borderBottom: `1px solid ${C.border}`
-    }
-  }, React.createElement("span", {
-    style: {
-      fontSize: 13,
-      color: C.ink2,
-      fontFamily: "DM Sans",
-      flex: 1,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 3,
       minWidth: 0
     }
-  }, c.nom), React.createElement("input", {
+  }, /*#__PURE__*/React.createElement("h2", {
+    id: "titre-saisie"
+  }, edit.nom), /*#__PURE__*/React.createElement("span", {
+    className: "petit"
+  }, sous)), /*#__PURE__*/React.createElement("button", {
+    className: "rond",
+    style: {
+      background: 'var(--surface2)',
+      border: 'none'
+    },
+    onClick: onClose,
+    "aria-label": "Fermer"
+  }, /*#__PURE__*/React.createElement(Ico, {
+    d: I.croix,
+    size: 18,
+    sw: 2.2
+  }))), /*#__PURE__*/React.createElement("form", {
+    onSubmit: e => {
+      e.preventDefault();
+      ok();
+    },
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    htmlFor: "montant",
+    style: {
+      fontSize: 13,
+      fontWeight: 600,
+      color: 'var(--ink2)'
+    }
+  }, "Montant"), /*#__PURE__*/React.createElement("div", {
+    className: "champ"
+  }, /*#__PURE__*/React.createElement("input", {
+    id: "montant",
+    ref: ref,
     type: "text",
     inputMode: "decimal",
-    value: vals[c.nom] === undefined ? '' : vals[c.nom],
-    onChange: e => {
-      if (onDirty) onDirty(true);
-      setVals(Object.assign({}, vals, {
-        [c.nom]: nettoyerSaisie(e.target.value)
-      }));
-    },
-    placeholder: "0",
+    autoComplete: "off",
+    enterKeyHint: "done",
+    value: txt,
+    onChange: e => setTxt(nettoyer(e.target.value)),
+    placeholder: "0,00"
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "eur"
+  }, "€"))), /*#__PURE__*/React.createElement("div", {
+    className: "chips"
+  }, reference !== null && reference !== undefined && /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setTxt(pourSaisie(reference))
+  }, "Comme ", moisNom(source), " · ", eur(reference)), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setTxt('0,00')
+  }, "Mettre à 0"), txt !== '' && /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setTxt('')
+  }, "Effacer")), /*#__PURE__*/React.createElement("div", {
+    className: "deux"
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "bouton second",
+    onClick: onClose
+  }, "Annuler"), /*#__PURE__*/React.createElement("button", {
+    type: "submit",
+    className: "bouton"
+  }, "Valider"))), onMasquer && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "sep"
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "masquer",
+    onClick: onMasquer
+  }, /*#__PURE__*/React.createElement(Ico, {
+    d: I.oeil,
+    size: 20
+  }), /*#__PURE__*/React.createElement("span", {
     style: {
-      width: 110,
-      padding: "7px 10px",
-      textAlign: "right",
-      border: `1.5px solid ${C.border}`,
-      borderRadius: 8,
-      fontFamily: "DM Sans",
-      fontSize: 13,
-      fontWeight: 600,
-      color: couleur,
-      background: C.bg,
-      outline: "none"
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 2
     }
-  }), !compact && React.createElement("button", {
-    onClick: () => supprimerCategorie(c.nom),
-    disabled: saving,
-    title: 'Retirer ' + c.nom,
+  }, /*#__PURE__*/React.createElement("span", {
     style: {
-      border: "none",
-      background: "transparent",
-      cursor: saving ? "default" : "pointer",
-      color: C.ink3,
-      fontSize: 16,
-      lineHeight: 1,
-      padding: "4px 2px",
-      fontFamily: "DM Sans",
-      opacity: saving ? .4 : .65
-    }
-  }, "×"))));
-  return React.createElement("div", null, React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 28,
-      flexWrap: "wrap",
-      marginBottom: 20
-    }
-  }, colonne('Revenus', revenus, '#2E8B57', totRev), colonne('Dépenses', depenses, '#E04848', totDep)), reconduitDe && React.createElement("div", {
-    style: {
-      background: "#EAF4FA",
-      border: "1px solid #BBD9EA",
-      borderRadius: 12,
-      padding: "10px 16px",
-      marginBottom: 16,
-      fontSize: 12,
-      fontFamily: "DM Sans",
-      color: "#1F5C7A",
-      display: "flex",
-      alignItems: "center",
-      gap: 8,
-      flexWrap: "wrap"
-    }
-  }, React.createElement("span", null, "↻ Montants reconduits depuis ", React.createElement("strong", null, moisLisible(reconduitDe)), ". Vérifie-les puis enregistre."), React.createElement("button", {
-    onClick: () => chargerDepuis(mois, false),
-    style: {
-      border: "1px solid #BBD9EA",
-      background: "transparent",
-      borderRadius: 8,
-      padding: "4px 10px",
-      cursor: "pointer",
-      fontFamily: "DM Sans",
-      fontSize: 11,
-      fontWeight: 600,
-      color: "#1F5C7A",
-      marginLeft: "auto"
-    }
-  }, "Repartir de zéro")), React.createElement("div", {
-    style: {
-      background: solde >= 0 ? '#EAF6EF' : '#FDECEC',
-      border: `1px solid ${solde >= 0 ? '#BFE3CD' : '#F5C6C6'}`,
-      borderRadius: 12,
-      padding: "12px 18px",
-      marginBottom: 20,
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center"
-    }
-  }, React.createElement("span", {
-    style: {
-      fontSize: 12,
-      fontWeight: 600,
-      color: C.ink2,
-      textTransform: "uppercase",
-      letterSpacing: ".08em",
-      fontFamily: "DM Sans"
-    }
-  }, "Solde du mois"), React.createElement("span", {
-    style: {
-      fontFamily: "Playfair Display",
-      fontSize: 24,
-      fontWeight: 900,
-      color: solde >= 0 ? '#2E8B57' : '#E04848'
-    }
-  }, fmtM(solde))), !compact && React.createElement("div", {
-    style: {
-      marginBottom: 20
-    }
-  }, React.createElement("div", {
-    style: {
-      fontSize: 11,
-      fontWeight: 700,
-      color: '#1F7A99',
-      textTransform: "uppercase",
-      letterSpacing: ".1em",
-      fontFamily: "DM Sans",
-      marginBottom: 8
-    }
-  }, "Comptes — solde en fin de mois"), FIN_COMPTES.map((c, i) => React.createElement("div", {
-    key: i,
-    style: {
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between",
-      gap: 10,
-      padding: "7px 0",
-      borderBottom: `1px solid ${C.border}`
-    }
-  }, React.createElement("span", {
-    style: {
-      fontSize: 13,
-      color: C.ink2,
-      fontFamily: "DM Sans"
-    }
-  }, c), React.createElement("input", {
-    type: "text",
-    inputMode: "decimal",
-    value: sold[c] === undefined ? '' : sold[c],
-    onChange: e => {
-      if (onDirty) onDirty(true);
-      setSold(Object.assign({}, sold, {
-        [c]: nettoyerSaisie(e.target.value)
-      }));
-    },
-    placeholder: "0",
-    style: {
-      width: 120,
-      padding: "7px 10px",
-      textAlign: "right",
-      border: `1.5px solid ${C.border}`,
-      borderRadius: 8,
-      fontFamily: "DM Sans",
-      fontSize: 13,
-      fontWeight: 600,
-      color: '#1F7A99',
-      background: C.bg,
-      outline: "none"
-    }
-  }))), React.createElement("div", {
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      marginTop: 10,
-      paddingTop: 8,
-      borderTop: `2px solid ${C.border}`
-    }
-  }, React.createElement("span", {
-    style: {
-      fontSize: 12,
-      fontWeight: 600,
-      color: C.ink2,
-      fontFamily: "DM Sans"
-    }
-  }, "Total patrimoine"), React.createElement("span", {
-    style: {
-      fontFamily: "Playfair Display",
-      fontSize: 19,
-      fontWeight: 800,
-      color: '#1F7A99'
-    }
-  }, fmtM(patrimoine)))), React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 10,
-      alignItems: "center",
-      flexWrap: "wrap"
-    }
-  }, React.createElement("button", {
-    onClick: sauvegarder,
-    disabled: saving,
-    style: {
-      padding: "11px 24px",
-      borderRadius: 10,
-      border: "none",
-      background: saving ? C.ink3 : C.ink,
-      color: "#fff",
-      fontFamily: "DM Sans",
-      fontSize: 14,
-      fontWeight: 700,
-      cursor: saving ? "default" : "pointer"
-    }
-  }, saving ? 'Enregistrement…' : 'Enregistrer'), msg && React.createElement("span", {
-    style: {
-      fontSize: 13,
-      fontWeight: 600,
-      fontFamily: "DM Sans",
-      color: msg.ok ? '#2E8B57' : '#E04848'
-    }
-  }, msg.ok ? '✓ ' : '✗ ', msg.txt)), !compact && React.createElement("div", {
-    style: {
-      marginTop: 22,
-      paddingTop: 18,
-      borderTop: `1px solid ${C.border}`
-    }
-  }, React.createElement("div", {
-    style: {
-      fontSize: 11,
-      fontWeight: 700,
-      color: C.ink3,
-      textTransform: "uppercase",
-      letterSpacing: ".1em",
-      fontFamily: "DM Sans",
-      marginBottom: 10
-    }
-  }, "Ajouter une ligne"), React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 8,
-      flexWrap: "wrap"
-    }
-  }, React.createElement("input", {
-    value: nouvelle,
-    onChange: e => setNouvelle(e.target.value),
-    placeholder: "Nom (ex. Mutuelle)",
-    style: {
-      flex: 1,
-      minWidth: 160,
-      padding: "9px 12px",
-      border: `1.5px solid ${C.border}`,
-      borderRadius: 10,
-      fontFamily: "DM Sans",
-      fontSize: 13,
-      background: C.bg,
-      outline: "none"
-    }
-  }), React.createElement("select", {
-    value: typeNouv,
-    onChange: e => setTypeNouv(e.target.value),
-    style: {
-      padding: "9px 12px",
-      border: `1.5px solid ${C.border}`,
-      borderRadius: 10,
-      fontFamily: "DM Sans",
-      fontSize: 13,
-      fontWeight: 600,
-      background: C.bg,
-      outline: "none",
-      cursor: "pointer"
-    }
-  }, React.createElement("option", {
-    value: "depense"
-  }, "Dépense"), React.createElement("option", {
-    value: "revenu"
-  }, "Revenu")), React.createElement("button", {
-    onClick: ajouterCategorie,
-    disabled: saving || !nouvelle.trim(),
-    style: {
-      padding: "9px 18px",
-      borderRadius: 10,
-      border: `1.5px solid ${C.ink}`,
-      background: "transparent",
-      color: C.ink,
-      fontFamily: "DM Sans",
-      fontSize: 13,
-      fontWeight: 700,
-      cursor: saving || !nouvelle.trim() ? "default" : "pointer",
-      opacity: saving || !nouvelle.trim() ? .45 : 1
-    }
-  }, "Ajouter")), (data.finCategories || []).filter(c => !c.actif).length > 0 && React.createElement("div", {
-    style: {
-      marginTop: 16
-    }
-  }, React.createElement("div", {
-    style: {
-      fontSize: 11,
-      fontWeight: 700,
-      color: C.ink3,
-      textTransform: "uppercase",
-      letterSpacing: ".1em",
-      fontFamily: "DM Sans",
-      marginBottom: 8
-    }
-  }, "Lignes masquées"), React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 8,
-      flexWrap: "wrap"
-    }
-  }, (data.finCategories || []).filter(c => !c.actif).map((c, i) => React.createElement("button", {
-    key: i,
-    onClick: () => restaurerCategorie(c.nom),
-    disabled: saving,
-    style: {
-      display: "inline-flex",
-      alignItems: "center",
-      gap: 6,
-      border: `1.5px dashed ${C.border}`,
-      background: "transparent",
-      borderRadius: 20,
-      padding: "5px 12px",
-      cursor: saving ? "default" : "pointer",
-      fontFamily: "DM Sans",
-      fontSize: 12,
-      fontWeight: 600,
-      color: C.ink3
-    }
-  }, c.nom, React.createElement("span", {
-    style: {
-      fontSize: 14,
-      lineHeight: 1
-    }
-  }, "↩")))))));
-}
-function PageSituation({
-  data,
-  onRefresh,
-  onDirty
-}) {
-  const [mois, setMois] = useState(moisCourantYM());
-  const options = [];
-  const d0 = new Date();
-  for (let i = 0; i < 24; i++) {
-    const d = new Date(d0.getFullYear(), d0.getMonth() - i, 1);
-    options.push(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'));
-  }
-  const pret = (data.finCategories || []).length > 0;
-  return React.createElement("div", {
-    style: {
-      padding: "32px 28px",
-      maxWidth: 980,
-      margin: "0 auto"
-    }
-  }, React.createElement("div", {
-    className: "fade-up",
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center",
-      flexWrap: "wrap",
-      gap: 12,
-      marginBottom: 20
-    }
-  }, React.createElement(SectionTitle, {
-    accent: "#96CEB4"
-  }, "Situation"), React.createElement("select", {
-    value: mois,
-    onChange: e => setMois(e.target.value),
-    style: {
-      padding: "10px 16px",
-      borderRadius: 10,
-      border: `2px solid ${C.border}`,
-      background: C.white,
-      color: C.ink,
-      fontFamily: "DM Sans",
-      fontSize: 14,
-      fontWeight: 700,
-      cursor: "pointer",
-      outline: "none"
-    }
-  }, options.map(m => React.createElement("option", {
-    key: m,
-    value: m
-  }, moisLisible(m))))), React.createElement("div", {
-    className: "fade-up-2",
-    style: {
-      background: C.white,
-      borderRadius: 20,
-      padding: "26px 28px",
-      boxShadow: C.shadow
-    }
-  }, pret ? React.createElement(EditeurMois, {
-    data: data,
-    mois: mois,
-    onSaved: onRefresh,
-    onDirty: onDirty
-  }) : React.createElement("div", {
-    style: {
-      fontSize: 13,
-      color: C.ink3,
-      fontFamily: "DM Sans",
-      lineHeight: 1.6
-    }
-  }, "Les catégories ne sont pas encore initialisées.", React.createElement("br", null), "Dans Google\xA0Sheets : menu ", React.createElement("strong", null, "⚙️ Finances → Initialiser"), ", puis reviens ici et actualise.")));
-}
-function PageArchives({
-  data,
-  onRefresh,
-  onDirty
-}) {
-  const archives = data.finArchives || [];
-  const soldes = data.finSoldes || [];
-  const cats = data.finCategories || [];
-  const typeDe = {};
-  cats.forEach(c => {
-    typeDe[c.nom] = c.type;
-  });
-  const [annee, setAnnee] = useState('toutes');
-  const [secteur, setSecteur] = useState('tous');
-  const [editMois, setEditMois] = useState(null);
-  const moisSet = {};
-  archives.forEach(a => {
-    moisSet[a.mois] = true;
-  });
-  soldes.forEach(s => {
-    moisSet[s.mois] = true;
-  });
-  const tousMois = Object.keys(moisSet).sort().reverse();
-  const annees = [];
-  tousMois.forEach(m => {
-    const y = m.slice(0, 4);
-    if (annees.indexOf(y) === -1) annees.push(y);
-  });
-  const moisFiltres = tousMois.filter(m => annee === 'toutes' || m.slice(0, 4) === annee);
-  const lignes = moisFiltres.map(m => {
-    const duMois = archives.filter(a => a.mois === m).filter(a => secteur === 'tous' || a.categorie === secteur);
-    const rev = duMois.filter(a => typeDe[a.categorie] !== 'depense').reduce((s, a) => s + a.montant, 0);
-    const dep = duMois.filter(a => typeDe[a.categorie] === 'depense').reduce((s, a) => s + a.montant, 0);
-    const pat = soldes.filter(s => s.mois === m).reduce((s, x) => s + x.montant, 0);
-    return {
-      mois: m,
-      rev,
-      dep,
-      solde: rev - dep,
-      pat
-    };
-  });
-  const totRev = lignes.reduce((a, l) => a + l.rev, 0);
-  const totDep = lignes.reduce((a, l) => a + l.dep, 0);
-  const selStyle = {
-    padding: "9px 14px",
-    borderRadius: 10,
-    border: `2px solid ${C.border}`,
-    background: C.white,
-    color: C.ink,
-    fontFamily: "DM Sans",
-    fontSize: 13,
-    fontWeight: 600,
-    cursor: "pointer",
-    outline: "none"
-  };
-  return React.createElement("div", {
-    style: {
-      padding: "32px 28px",
-      maxWidth: 980,
-      margin: "0 auto"
-    }
-  }, React.createElement("div", {
-    className: "fade-up",
-    style: {
-      marginBottom: 18
-    }
-  }, React.createElement(SectionTitle, {
-    accent: "#45B7D1"
-  }, "Archives"), React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 10,
-      flexWrap: "wrap"
-    }
-  }, React.createElement("select", {
-    value: annee,
-    onChange: e => setAnnee(e.target.value),
-    style: selStyle
-  }, React.createElement("option", {
-    value: "toutes"
-  }, "Toutes les années"), annees.map(y => React.createElement("option", {
-    key: y,
-    value: y
-  }, y))), React.createElement("select", {
-    value: secteur,
-    onChange: e => setSecteur(e.target.value),
-    style: selStyle
-  }, React.createElement("option", {
-    value: "tous"
-  }, "Tous les secteurs"), cats.map((c, i) => React.createElement("option", {
-    key: i,
-    value: c.nom
-  }, c.nom))))), React.createElement("div", {
-    className: "fade-up",
-    style: {
-      display: "grid",
-      gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))",
-      gap: 14,
-      marginBottom: 22
-    }
-  }, React.createElement(KpiCard, {
-    label: "Revenus",
-    value: fmtM(totRev),
-    color: "#2E8B57"
-  }), React.createElement(KpiCard, {
-    label: "Dépenses",
-    value: fmtM(totDep),
-    color: "#E04848",
-    delay: "-2"
-  }), React.createElement(KpiCard, {
-    label: "Solde cumulé",
-    value: fmtM(totRev - totDep),
-    color: totRev - totDep >= 0 ? "#45B7D1" : "#E04848",
-    delay: "-3"
-  }), React.createElement(KpiCard, {
-    label: "Mois enregistrés",
-    value: String(lignes.length),
-    color: "#FECA57",
-    delay: "-4"
-  })), React.createElement("div", {
-    className: "fade-up-2",
-    style: {
-      background: C.white,
-      borderRadius: 20,
-      padding: "24px 28px",
-      boxShadow: C.shadow
-    }
-  }, lignes.length === 0 ? React.createElement("div", {
-    style: {
-      fontSize: 13,
-      color: C.ink3,
-      fontFamily: "DM Sans",
-      textAlign: "center",
-      padding: "20px 0"
-    }
-  }, "Aucune donnée enregistrée pour cette sélection.") : React.createElement("div", {
-    style: {
-      overflowX: "auto"
-    }
-  }, React.createElement("table", {
-    style: {
-      width: "100%",
-      borderCollapse: "separate",
-      borderSpacing: "0 3px",
-      fontFamily: "DM Sans",
-      fontSize: 12
-    }
-  }, React.createElement("thead", null, React.createElement("tr", null, ["Mois", "Revenus", "Dépenses", "Solde", "Patrimoine", ""].map(h => React.createElement("th", {
-    key: h,
-    style: {
-      textAlign: "left",
-      padding: "8px 12px",
-      fontSize: 10,
-      fontWeight: 600,
-      color: C.ink3,
-      textTransform: "uppercase",
-      letterSpacing: ".08em",
-      borderBottom: `2px solid ${C.border}`
-    }
-  }, h)))), React.createElement("tbody", null, lignes.map((l, i) => React.createElement("tr", {
-    key: i,
-    style: {
-      background: i % 2 === 0 ? "#F4F7FA" : C.white
-    }
-  }, React.createElement("td", {
-    style: {
-      padding: "10px 12px",
-      fontWeight: 600,
-      color: C.ink
-    }
-  }, moisLisible(l.mois)), React.createElement("td", {
-    style: {
-      padding: "10px 12px",
-      color: "#2E8B57",
-      fontWeight: 500
-    }
-  }, l.rev > 0 ? fmtM(l.rev) : "—"), React.createElement("td", {
-    style: {
-      padding: "10px 12px",
-      color: "#E04848",
-      fontWeight: 500
-    }
-  }, l.dep > 0 ? fmtM(l.dep) : "—"), React.createElement("td", {
-    style: {
-      padding: "10px 12px"
-    }
-  }, React.createElement("span", {
-    style: {
-      background: l.solde >= 0 ? "#2E8B5718" : "#E0484818",
-      color: l.solde >= 0 ? "#2E8B57" : "#E04848",
-      padding: "4px 10px",
-      borderRadius: 6,
+      fontSize: 15,
       fontWeight: 700
     }
-  }, fmtM(l.solde))), React.createElement("td", {
+  }, "Masquer cette ligne"), /*#__PURE__*/React.createElement("span", {
+    className: "petit",
     style: {
-      padding: "10px 12px",
-      color: "#1F7A99",
-      fontWeight: 500
+      fontSize: 12
     }
-  }, l.pat > 0 ? fmtM(l.pat) : "—"), React.createElement("td", {
+  }, "Les montants déjà enregistrés restent dans l'historique.")))));
+}
+function FeuilleAjout({
+  type,
+  onClose,
+  onAjouter
+}) {
+  const [nom, setNom] = useState('');
+  const ref = useRef(null);
+  useEffect(() => {
+    const t = setTimeout(() => ref.current && ref.current.focus(), 60);
+    return () => clearTimeout(t);
+  }, []);
+  return /*#__PURE__*/React.createElement(Feuille, {
+    onClose: onClose,
+    labelId: "titre-ajout"
+  }, /*#__PURE__*/React.createElement("h2", {
+    id: "titre-ajout"
+  }, type === 'depense' ? 'Nouvelle dépense' : 'Nouveau revenu'), /*#__PURE__*/React.createElement("form", {
+    onSubmit: e => {
+      e.preventDefault();
+      onAjouter(nom, type);
+    },
     style: {
-      padding: "10px 12px"
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 16
     }
-  }, React.createElement("button", {
-    onClick: () => setEditMois(editMois === l.mois ? null : l.mois),
+  }, /*#__PURE__*/React.createElement("label", {
+    htmlFor: "nom-ligne",
+    className: "petit",
     style: {
-      border: `1.5px solid ${C.border}`,
-      background: "transparent",
-      borderRadius: 8,
-      padding: "5px 12px",
-      cursor: "pointer",
-      fontFamily: "DM Sans",
-      fontSize: 12,
       fontWeight: 600,
-      color: C.ink2
+      color: 'var(--ink2)'
     }
-  }, editMois === l.mois ? 'Fermer' : 'Corriger'))))))), editMois && React.createElement("div", {
+  }, "Nom de la ligne"), /*#__PURE__*/React.createElement("input", {
+    id: "nom-ligne",
+    ref: ref,
+    className: "champ-texte",
+    value: nom,
+    onChange: e => setNom(e.target.value),
+    placeholder: type === 'depense' ? 'Ex. : Assurance habitation' : 'Ex. : Salaire lycée',
+    autoComplete: "off"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "deux"
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "bouton second",
+    onClick: onClose
+  }, "Annuler"), /*#__PURE__*/React.createElement("button", {
+    type: "submit",
+    className: "bouton",
+    disabled: !nom.trim()
+  }, "Ajouter"))));
+}
+
+/* ---------- Historique ---------- */
+
+function PageHistorique({
+  d,
+  onGoMois
+}) {
+  const [vue, setVue] = useState('mois');
+  const [filtre, setFiltre] = useState('rev');
+  const [sel, setSel] = useState(null);
+  const [selY, setSelY] = useState(null);
+  if (!d.moisArch.length) {
+    return /*#__PURE__*/React.createElement("div", {
+      className: "page"
+    }, /*#__PURE__*/React.createElement("header", {
+      className: "entete"
+    }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h1", null, "Historique"))), /*#__PURE__*/React.createElement("div", {
+      className: "carte petit"
+    }, "Aucun mois enregistré pour l'instant."));
+  }
+
+  // Mois continus du premier au dernier mois saisi
+  const premier = d.moisArch[0],
+    dernier = d.moisArch[d.moisArch.length - 1];
+  const tous = [];
+  for (let m = premier; m <= dernier; m = ymAjoute(m, 1)) tous.push(m);
+  const catsRev = Array.from(new Set(d.arch.filter(a => (d.typeDe[a.categorie] || 'revenu') === 'revenu' && a.montant).map(a => a.categorie)));
+  const aDepenses = d.arch.some(a => d.typeDe[a.categorie] === 'depense' && a.montant);
+  const filtres = [['rev', 'Tous revenus']].concat(catsRev.map(c => [c, c]));
+  if (aDepenses) filtres.push(['dep', 'Dépenses']);
+  const f = filtres.some(x => x[0] === filtre) ? filtre : 'rev';
+  const nomFiltre = f === 'rev' ? 'Revenus' : f === 'dep' ? 'Dépenses' : f;
+  const val = m => {
+    const p = d.parMois[m];
+    if (!p) return 0;
+    if (f === 'rev') return p.rev;
+    if (f === 'dep') return p.dep;
+    return p.cats[f] || 0;
+  };
+  const visibles = tous.slice(-24);
+  const iSel = sel !== null && sel < visibles.length ? sel : visibles.length - 1;
+  const max = Math.max.apply(null, tous.map(val).concat([1]));
+  const annees = Array.from(new Set(tous.map(m => m.slice(0, 4))));
+  const parAn = annees.map(y => {
+    const ms = tous.filter(m => m.slice(0, 4) === y);
+    const saisis = ms.filter(m => d.moisArch.indexOf(m) >= 0);
+    return {
+      y,
+      tot: ms.reduce((a, m) => a + val(m), 0),
+      n: saisis.length
+    };
+  });
+  const yCourant = selY && annees.indexOf(selY) >= 0 ? selY : annees[annees.length - 1];
+  const aSel = parAn.find(a => a.y === yCourant);
+  const maxY = Math.max.apply(null, parAn.map(a => a.tot).concat([1]));
+  const groupesAn = [];
+  visibles.forEach(m => {
+    const y = m.slice(0, 4);
+    const g = groupesAn[groupesAn.length - 1];
+    if (g && g.y === y) g.n++;else groupesAn.push({
+      y,
+      n: 1
+    });
+  });
+  const premiereDep = d.moisArch.find(m => d.parMois[m].dep > 0);
+  const avertissement = !premiereDep ? 'Aucune dépense n\'a encore été saisie : les soldes mensuels ne tiennent compte que des revenus.' : premiereDep > premier ? 'Avant ' + moisLong(premiereDep) + ', seuls les revenus ont été importés. Les soldes de cette période n\'incluent donc aucune dépense.' : null;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "page"
+  }, /*#__PURE__*/React.createElement("header", {
+    className: "entete"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h1", null, "Historique"))), /*#__PURE__*/React.createElement("div", {
+    className: "seg",
+    role: "group",
+    "aria-label": "Période"
+  }, /*#__PURE__*/React.createElement("button", {
+    "aria-pressed": vue === 'mois',
+    onClick: () => setVue('mois')
+  }, "Par mois"), /*#__PURE__*/React.createElement("button", {
+    "aria-pressed": vue === 'annee',
+    onClick: () => setVue('annee')
+  }, "Par année")), avertissement && /*#__PURE__*/React.createElement("div", {
+    className: "bandeau warn"
+  }, /*#__PURE__*/React.createElement(IcoInfo, {
+    color: "var(--warnInk)"
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "txt"
+  }, avertissement)), /*#__PURE__*/React.createElement("section", {
+    className: "carte",
     style: {
-      marginTop: 22,
-      paddingTop: 20,
-      borderTop: `2px solid ${C.border}`
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 14
     }
-  }, React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("div", {
     style: {
-      fontFamily: "Playfair Display",
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 2
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "sur-titre"
+  }, nomFiltre, " · ", vue === 'mois' ? 'par mois' : 'par année'), /*#__PURE__*/React.createElement("span", {
+    className: "petit",
+    style: {
+      color: 'var(--ink2)'
+    }
+  }, vue === 'mois' ? capital(moisLong(visibles[iSel])) : yCourant + (aSel.n < 12 ? ' · ' + aSel.n + ' mois saisis' : '')), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 26,
+      fontWeight: 800,
+      letterSpacing: '-0.01em',
+      color: 'var(--barOn)'
+    }
+  }, eur(vue === 'mois' ? val(visibles[iSel]) : aSel.tot))), vue === 'mois' ? /*#__PURE__*/React.createElement("div", {
+    "data-noswipe": "1",
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "barres"
+  }, visibles.map((m, i) => /*#__PURE__*/React.createElement("button", {
+    key: m,
+    "aria-pressed": i === iSel,
+    "aria-label": moisLong(m) + ', ' + eur(val(m)),
+    onClick: () => setSel(i)
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      height: Math.max(3, Math.round(val(m) / max * 146))
+    }
+  })))), /*#__PURE__*/React.createElement("div", {
+    className: "annees"
+  }, groupesAn.map(g => /*#__PURE__*/React.createElement("span", {
+    key: g.y,
+    style: {
+      flex: g.n + ' 1 0'
+    }
+  }, g.n >= 2 ? g.y : '')))) : /*#__PURE__*/React.createElement("div", {
+    className: "barres-an",
+    "data-noswipe": "1"
+  }, parAn.map(a => /*#__PURE__*/React.createElement("button", {
+    key: a.y,
+    "aria-pressed": a.y === yCourant,
+    "aria-label": a.y + ', ' + eur(a.tot),
+    onClick: () => setSelY(a.y)
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      textAlign: 'center'
+    }
+  }, a.y), /*#__PURE__*/React.createElement("span", {
+    className: "b",
+    style: {
+      height: Math.max(3, Math.round(a.tot / maxY * 150))
+    }
+  })))), /*#__PURE__*/React.createElement("div", {
+    className: "chips",
+    role: "group",
+    "aria-label": "Filtrer"
+  }, filtres.map(x => /*#__PURE__*/React.createElement("button", {
+    key: x[0],
+    "aria-pressed": x[0] === f,
+    onClick: () => setFiltre(x[0])
+  }, x[1])))), vue === 'mois' ? annees.slice().reverse().map(y => {
+    const ms = tous.filter(m => m.slice(0, 4) === y).reverse();
+    return /*#__PURE__*/React.createElement("div", {
+      className: "section",
+      key: y
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "section-tete"
+    }, /*#__PURE__*/React.createElement("h2", null, y), /*#__PURE__*/React.createElement("span", {
+      className: f === 'dep' ? 'c-dep' : 'c-rev'
+    }, eur(ms.reduce((a, m) => a + val(m), 0)))), /*#__PURE__*/React.createElement("div", {
+      className: "liste"
+    }, ms.map(m => /*#__PURE__*/React.createElement("button", {
+      className: "hist-rang",
+      key: m,
+      onClick: () => onGoMois(m)
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "l1"
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "nom"
+    }, capital(moisNom(m))), /*#__PURE__*/React.createElement("span", {
+      className: "mt"
+    }, val(m) ? eur(val(m)) : '—'), /*#__PURE__*/React.createElement(Ico, {
+      d: I.droite,
+      size: 16,
+      color: "var(--ink4)"
+    })), /*#__PURE__*/React.createElement("span", {
+      className: "jauge"
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        width: Math.round(val(m) / max * 100) + '%',
+        background: f === 'dep' ? 'var(--dep2)' : undefined
+      }
+    }))))));
+  }) : /*#__PURE__*/React.createElement("div", {
+    className: "liste"
+  }, parAn.slice().reverse().map(a => /*#__PURE__*/React.createElement("div", {
+    key: a.y,
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 4,
+      padding: '14px 16px',
+      borderTop: a.y === parAn[parAn.length - 1].y ? 'none' : '1px solid var(--line2)'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "ligne-tete"
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
       fontSize: 17,
-      fontWeight: 700,
-      color: C.ink,
-      marginBottom: 14
+      fontWeight: 800
     }
-  }, "Correction — ", moisLisible(editMois)), React.createElement(EditeurMois, {
-    data: data,
-    mois: editMois,
-    onSaved: onRefresh,
-    onDirty: onDirty
-  }))));
+  }, a.y), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 17,
+      fontWeight: 800
+    },
+    className: f === 'dep' ? 'c-dep' : 'c-rev'
+  }, eur(a.tot))), /*#__PURE__*/React.createElement("span", {
+    className: "petit"
+  }, a.n, " mois saisis · moyenne ", eur(a.n ? a.tot / a.n : 0), " par mois")))));
 }
-const TABS = [{
-  id: "situation",
-  label: "Situation"
+
+/* ---------- Menu ---------- */
+
+function FeuilleMenu({
+  d,
+  onClose,
+  onRefresh,
+  theme,
+  setTheme,
+  maj,
+  onRestaurer,
+  chargement
+}) {
+  const [ouvert, setOuvert] = useState(false);
+  const masquees = d.cats.filter(c => !c.actif);
+  const heure = maj ? maj.toDateString() === new Date().toDateString() ? 'aujourd\'hui à ' + maj.toLocaleTimeString('fr-FR', {
+    hour: '2-digit',
+    minute: '2-digit'
+  }) : 'le ' + maj.toLocaleDateString('fr-FR', {
+    day: 'numeric',
+    month: 'long'
+  }) : 'jamais';
+  return /*#__PURE__*/React.createElement(Feuille, {
+    onClose: onClose,
+    fond: true,
+    labelId: "titre-menu"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ligne-tete",
+    style: {
+      padding: '0 4px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 2
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    id: "titre-menu"
+  }, "Comptes"), /*#__PURE__*/React.createElement("span", {
+    className: "petit"
+  }, "Version ", APP_VERSION.slice(1), " · données mises à jour ", heure)), /*#__PURE__*/React.createElement("button", {
+    className: "rond",
+    onClick: onClose,
+    "aria-label": "Fermer"
+  }, /*#__PURE__*/React.createElement(Ico, {
+    d: I.croix,
+    size: 18,
+    sw: 2.2
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "liste"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "menu-rang",
+    onClick: onRefresh,
+    disabled: chargement
+  }, /*#__PURE__*/React.createElement(Ico, {
+    d: I.refresh,
+    color: "var(--barOn)"
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "txt"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "t1"
+  }, chargement ? 'Actualisation…' : 'Actualiser les données'))), /*#__PURE__*/React.createElement("a", {
+    className: "menu-rang",
+    href: LIENS.nominas,
+    target: "_blank",
+    rel: "noopener"
+  }, /*#__PURE__*/React.createElement(IcoTableur, null), /*#__PURE__*/React.createElement("span", {
+    className: "txt"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "t1"
+  }, "Nóminas"), /*#__PURE__*/React.createElement("span", {
+    className: "t2"
+  }, "Feuille Google Sheets")), /*#__PURE__*/React.createElement(Ico, {
+    d: I.externe,
+    size: 18,
+    color: "var(--ink4)"
+  })), /*#__PURE__*/React.createElement("a", {
+    className: "menu-rang",
+    href: LIENS.impots,
+    target: "_blank",
+    rel: "noopener"
+  }, /*#__PURE__*/React.createElement(IcoDoc, null), /*#__PURE__*/React.createElement("span", {
+    className: "txt"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "t1"
+  }, "Impôts"), /*#__PURE__*/React.createElement("span", {
+    className: "t2"
+  }, "Feuille Google Sheets")), /*#__PURE__*/React.createElement(Ico, {
+    d: I.externe,
+    size: 18,
+    color: "var(--ink4)"
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "liste"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "menu-rang",
+    onClick: () => setOuvert(!ouvert),
+    "aria-expanded": ouvert,
+    disabled: !masquees.length
+  }, /*#__PURE__*/React.createElement(Ico, {
+    d: I.oeil,
+    color: "var(--barOn)"
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "txt"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "t1"
+  }, "Lignes masquées"), /*#__PURE__*/React.createElement("span", {
+    className: "t2"
+  }, masquees.length ? masquees.map(c => c.nom).join(', ') : 'Aucune')), masquees.length > 0 && /*#__PURE__*/React.createElement("span", {
+    style: {
+      transform: ouvert ? 'rotate(90deg)' : 'none',
+      display: 'flex'
+    }
+  }, /*#__PURE__*/React.createElement(Ico, {
+    d: I.droite,
+    size: 18,
+    color: "var(--ink4)"
+  }))), ouvert && masquees.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "menu-sous"
+  }, masquees.map(c => /*#__PURE__*/React.createElement("div", {
+    className: "it",
+    key: c.nom
+  }, /*#__PURE__*/React.createElement("span", null, c.nom), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onRestaurer(c.nom)
+  }, "Réafficher")))), /*#__PURE__*/React.createElement("div", {
+    className: "menu-rang",
+    style: {
+      flexWrap: 'wrap',
+      paddingTop: 12,
+      paddingBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement(Ico, {
+    d: I.lune,
+    color: "var(--barOn)"
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "txt"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "t1"
+  }, "Apparence")), /*#__PURE__*/React.createElement("div", {
+    className: "seg",
+    role: "group",
+    "aria-label": "Apparence",
+    style: {
+      width: '100%'
+    }
+  }, [['auto', 'Automatique'], ['light', 'Clair'], ['dark', 'Sombre']].map(x => /*#__PURE__*/React.createElement("button", {
+    key: x[0],
+    "aria-pressed": theme === x[0],
+    onClick: () => setTheme(x[0])
+  }, x[1]))))));
+}
+
+/* ---------- Application ---------- */
+
+const ONGLETS = [{
+  id: 'accueil',
+  label: 'Accueil'
 }, {
-  id: "archives",
-  label: "Archives"
+  id: 'mois',
+  label: 'Mois'
 }, {
-  id: "analyse",
-  label: "Analyse"
-}, {
-  id: "cours",
-  label: "Séances"
-}, {
-  id: "accueil",
-  label: "Élèves"
-}, {
-  id: "liens",
-  label: "Liens"
+  id: 'historique',
+  label: 'Historique'
 }];
-const CLE_CACHE = "suivi-cours-donnees";
-
-/** Dernier jeu de données reçu, conservé sur l'appareil */
-function lireCache() {
+function lireTheme() {
   try {
-    const brut = window.localStorage.getItem(CLE_CACHE);
-    if (!brut) return null;
-    const o = JSON.parse(brut);
-    return (o && o.raw) ? o : null;
+    const t = localStorage.getItem(CLE_THEME);
+    return t === 'light' || t === 'dark' ? t : 'auto';
   } catch (e) {
-    return null;
+    return 'auto';
   }
 }
-
-function ecrireCache(raw) {
-  try {
-    window.localStorage.setItem(CLE_CACHE, JSON.stringify({ raw: raw, at: Date.now() }));
-  } catch (e) {
-    // quota dépassé ou stockage indisponible : sans conséquence
-  }
-}
-
 function App() {
-  const cache = lireCache();
-  const [page, setPage] = useState("situation");
-  const [data, setData] = useState(cache ? parseSheetData(cache.raw) : DATA_FALLBACK);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [lastUpdate, setLastUpdate] = useState(cache ? new Date(cache.at) : null);
+  const cache = useMemo(lireCache, []);
+  const [raw, setRaw] = useState(cache ? cache.raw : null);
+  const [maj, setMaj] = useState(cache && cache.at ? new Date(cache.at) : null);
+  const [chargement, setChargement] = useState(false);
+  const [erreur, setErreur] = useState(null);
+  const [page, setPage] = useState('accueil');
+  const [mois, setMois] = useState(ymDe(new Date()));
   const [dirty, setDirty] = useState(false);
-  const brut = React.useRef(cache ? cache.raw : null);
-  async function fetchData() {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(API_URL);
-      const raw = await res.json();
-      if (raw.error) throw new Error(raw.error);
-      brut.current = raw;
-      ecrireCache(raw);
-      setData(parseSheetData(raw));
-      setLastUpdate(new Date());
-    } catch (e) {
-      setError("Impossible de charger les données : " + e.message);
-    } finally {
-      setLoading(false);
-    }
+  const [menu, setMenu] = useState(false);
+  const [toast, setToast] = useState(null);
+  const [theme, setThemeState] = useState(lireTheme);
+  const [aujourdhui] = useState(new Date());
+  const d = useMemo(() => analyser(raw), [raw]);
+  const toastT = useRef(null);
+  function notifier(txt, err) {
+    clearTimeout(toastT.current);
+    setToast({
+      txt,
+      err: !!err
+    });
+    toastT.current = setTimeout(() => setToast(null), err ? 4500 : 2200);
   }
-  async function refreshFinances() {
+  async function recharger(silencieux) {
+    setChargement(true);
     try {
-      const res = await fetch(API_URL + '?only=fin');
-      const part = await res.json();
-      if (part.error) throw new Error(part.error);
-      const complet = Object.assign({}, brut.current || {}, {
-        finCategories: part.finCategories,
-        finArchives: part.finArchives,
-        finSoldes: part.finSoldes
-      });
-      brut.current = complet;
-      ecrireCache(complet);
-      setData(parseSheetData(complet));
-      setLastUpdate(new Date());
-      setDirty(false);
+      const r = await apiGet();
+      ecrireCache(r);
+      setRaw(r);
+      setMaj(new Date());
+      setErreur(null);
+      if (!silencieux) notifier('Données à jour');
     } catch (e) {
-      await fetchData();
-      setDirty(false);
+      setErreur(e.message);
+      if (!silencieux || !raw) notifier('Impossible de charger les données : ' + e.message, true);
+    } finally {
+      setChargement(false);
     }
   }
   useEffect(() => {
-    fetchData();
+    recharger(true);
   }, []);
   useEffect(() => {
     function avant(e) {
@@ -2998,268 +1621,150 @@ function App() {
     window.addEventListener('beforeunload', avant);
     return () => window.removeEventListener('beforeunload', avant);
   }, [dirty]);
+  useEffect(() => {
+    const el = document.documentElement;
+    el.setAttribute('data-theme', theme);
+    try {
+      if (theme === 'auto') localStorage.removeItem(CLE_THEME);else localStorage.setItem(CLE_THEME, theme);
+    } catch (e) {/* rien */}
+    const meta = document.querySelector('meta[name="theme-color"]');
+    const sombre = theme === 'dark' || theme === 'auto' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    if (meta) meta.setAttribute('content', sombre ? '#111317' : '#F3F1EC');
+  }, [theme]);
+  function quitterSaisie() {
+    if (!dirty) return true;
+    if (!window.confirm('Des montants saisis n\'ont pas été enregistrés.\n\nLes abandonner ?')) return false;
+    setDirty(false);
+    return true;
+  }
   function allerVers(id) {
     if (id === page) return;
-    if (dirty && !window.confirm("Des montants saisis n'ont pas été enregistrés.\n\nQuitter cette page et les perdre ?")) return;
-    setDirty(false);
+    if (page === 'mois' && !quitterSaisie()) return;
     setPage(id);
+    window.scrollTo(0, 0);
   }
-  const touchRef = React.useRef({
-    x: 0,
-    y: 0
-  });
-  function onTouchStart(e) {
-    let n = e.target,
-      bloque = false;
-    for (let i = 0; n && i < 6; i++) {
-      const t = (n.tagName || '').toUpperCase();
-      if (t === 'INPUT' || t === 'SELECT' || t === 'TEXTAREA' || t === 'BUTTON') {
-        bloque = true;
-        break;
-      }
-      if (n.scrollWidth && n.clientWidth && n.scrollWidth > n.clientWidth + 4) {
-        bloque = true;
-        break;
-      }
-      n = n.parentElement;
+  function ouvrirMois(m) {
+    if (page === 'mois' && m !== mois && !quitterSaisie()) return;
+    setMois(m);
+    setPage('mois');
+    window.scrollTo(0, 0);
+  }
+  function changerMois(m) {
+    if (!quitterSaisie()) return;
+    setMois(m);
+    window.scrollTo(0, 0);
+  }
+  async function restaurer(nom) {
+    try {
+      await apiPost('saveCategories', {
+        categories: d.cats.map(c => c.nom === nom ? Object.assign({}, c, {
+          actif: true
+        }) : c)
+      });
+      notifier('« ' + nom + ' » réaffichée');
+      await recharger(true);
+    } catch (e) {
+      notifier('Échec : ' + e.message, true);
     }
-    touchRef.current = {
-      x: e.changedTouches[0].clientX,
-      y: e.changedTouches[0].clientY,
-      bloque: bloque
+  }
+
+  // Balayage horizontal entre onglets
+  const touche = useRef(null);
+  function debut(e) {
+    if (menu || document.querySelector('.feuille')) {
+      touche.current = null;
+      return;
+    }
+    if (e.target.closest && e.target.closest('[data-noswipe]')) {
+      touche.current = null;
+      return;
+    }
+    const t = e.touches[0];
+    touche.current = {
+      x: t.clientX,
+      y: t.clientY
     };
   }
-  function onTouchEnd(e) {
-    if (dirty) return;
-    if (touchRef.current.bloque) return;
-    const dx = e.changedTouches[0].clientX - touchRef.current.x;
-    const dy = e.changedTouches[0].clientY - touchRef.current.y;
-    if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5) {
-      const idx = TABS.findIndex(t => t.id === page);
-      if (dx < 0 && idx < TABS.length - 1) setPage(TABS[idx + 1].id);
-      if (dx > 0 && idx > 0) setPage(TABS[idx - 1].id);
-    }
+  function fin(e) {
+    if (!touche.current) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - touche.current.x,
+      dy = t.clientY - touche.current.y;
+    touche.current = null;
+    if (Math.abs(dx) < 70 || Math.abs(dy) > 50) return;
+    const i = ONGLETS.findIndex(o => o.id === page);
+    const j = dx < 0 ? i + 1 : i - 1;
+    if (j >= 0 && j < ONGLETS.length) allerVers(ONGLETS[j].id);
   }
-  return React.createElement("div", {
-    style: {
-      minHeight: "100vh",
-      background: C.bg,
-      fontFamily: "DM Sans, sans-serif",
-      overscrollBehaviorY: "contain"
-    },
-    onTouchStart: onTouchStart,
-    onTouchEnd: onTouchEnd
-  }, React.createElement("style", null, globalCSS), React.createElement("nav", {
-    style: {
-      background: C.white,
-      borderBottom: `1px solid ${C.border}`,
-      position: "sticky",
-      top: 0,
-      zIndex: 20,
-      boxShadow: "0 1px 12px rgba(0,0,0,0.05)"
-    }
-  }, React.createElement("div", {
-    style: {
-      maxWidth: 980,
-      margin: "0 auto",
-      padding: "0 16px",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between",
-      height: 46,
-      borderBottom: `1px solid ${C.border}`
-    }
-  }, React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 9
-    }
-  }, React.createElement("div", {
-    style: {
-      width: 28,
-      height: 28,
-      borderRadius: 8,
-      background: "linear-gradient(135deg,#1A1A2E,#2d2d5e)",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center"
-    }
-  }, React.createElement("svg", {
-    width: "14",
-    height: "14",
-    viewBox: "0 0 28 28",
-    fill: "none"
-  }, React.createElement("rect", {
-    x: "4",
-    y: "4",
-    width: "9",
-    height: "9",
-    rx: "2",
-    fill: "#FECA57"
-  }), React.createElement("rect", {
-    x: "15",
-    y: "4",
-    width: "9",
-    height: "9",
-    rx: "2",
-    fill: "#FF6B6B",
-    opacity: ".7"
-  }), React.createElement("rect", {
-    x: "4",
-    y: "15",
-    width: "9",
-    height: "9",
-    rx: "2",
-    fill: "#4ECDC4",
-    opacity: ".7"
-  }), React.createElement("rect", {
-    x: "15",
-    y: "15",
-    width: "9",
-    height: "9",
-    rx: "2",
-    fill: "#45B7D1"
-  }))), React.createElement("span", {
-    style: {
-      fontFamily: "Playfair Display",
-      fontWeight: 700,
-      fontSize: 14,
-      color: C.ink
-    }
-  }, "Comptes ", React.createElement("span", {
-    style: {
-      fontSize: 9,
-      color: C.ink3,
-      fontFamily: "DM Sans"
-    }
-  }, APP_VERSION))), React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 8
-    }
-  }, loading && React.createElement("div", {
-    style: {
-      width: 14,
-      height: 14,
-      border: `2px solid #E8E8F0`,
-      borderTopColor: C.ink,
-      borderRadius: "50%",
-      animation: "spin .7s linear infinite"
-    }
-  }), !loading && lastUpdate && React.createElement("span", {
-    style: {
-      fontSize: 9,
-      color: C.ink3
-    }
-  }, lastUpdate.toLocaleTimeString('fr-FR', {
-    hour: '2-digit',
-    minute: '2-digit'
-  })), React.createElement("button", {
-    onClick: fetchData,
-    disabled: loading,
-    style: {
-      background: "#1A1A2E",
-      color: "white",
-      borderRadius: 20,
-      padding: "4px 12px",
-      fontSize: 10,
-      fontFamily: "DM Sans",
-      fontWeight: 500,
-      letterSpacing: ".04em",
-      border: "none",
-      cursor: "pointer"
-    }
-  }, data.month !== "—" && data.month !== "Chargement…" ? data.month : "↻"))), React.createElement("div", {
-    style: {
-      maxWidth: 980,
-      margin: "0 auto",
-      display: "flex",
-      flexWrap: "wrap"
-    }
-  }, TABS.map(t => React.createElement("button", {
-    key: t.id,
-    className: `nav-tab${page === t.id ? " active" : ""}`,
-    onClick: () => allerVers(t.id),
-    style: {
-      flex: "1 1 auto",
-      minWidth: 0,
-      padding: "0 8px",
-      border: "none",
-      background: "transparent",
-      fontFamily: "DM Sans",
-      fontSize: 12,
-      fontWeight: page === t.id ? 600 : 400,
-      color: page === t.id ? C.ink : C.ink3,
-      cursor: "pointer",
-      borderBottom: `3px solid ${page === t.id ? C.ink : "transparent"}`,
-      height: 40,
-      transition: "all .2s",
-      whiteSpace: "nowrap",
-      textAlign: "center"
-    }
-  }, t.label)))), error && React.createElement("div", {
-    style: {
-      background: "#FFF0F0",
-      border: "1px solid #FFD0D0",
-      borderRadius: 10,
-      margin: "16px",
-      padding: "12px 16px",
-      fontSize: 12,
-      color: "#c0392b",
-      fontFamily: "DM Sans",
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center"
-    }
-  }, React.createElement("span", null, error), React.createElement("button", {
-    onClick: fetchData,
-    style: {
-      background: "#c0392b",
-      color: "white",
-      border: "none",
-      borderRadius: 6,
-      padding: "4px 10px",
-      cursor: "pointer",
-      fontSize: 11
-    }
-  }, "Réessayer")), loading && data.month === "—" && React.createElement("div", {
-    style: {
-      textAlign: "center",
-      padding: "80px 0",
-      color: C.ink3,
-      fontFamily: "DM Sans"
-    }
-  }, React.createElement("div", {
-    style: {
-      width: 32,
-      height: 32,
-      border: `3px solid ${C.border}`,
-      borderTopColor: C.ink,
-      borderRadius: "50%",
-      animation: "spin .7s linear infinite",
-      margin: "0 auto 16px"
-    }
-  }), React.createElement("div", {
-    style: {
-      fontSize: 14
-    }
-  }, "Chargement depuis Google Sheets…")), (!loading || data.month !== "—") && page === "accueil" && React.createElement(PageAccueil, {
-    data: data,
-    onRefresh: fetchData
-  }), (!loading || data.month !== "—") && page === "cours" && React.createElement(PageCours, {
-    data: data
-  }), (!loading || data.month !== "—") && page === "analyse" && React.createElement(PageAnalyse, {
-    data: data
-  }), (!loading || data.month !== "—") && page === "situation" && React.createElement(PageSituation, {
-    data: data,
-    onRefresh: refreshFinances,
-    onDirty: setDirty
-  }), (!loading || data.month !== "—") && page === "archives" && React.createElement(PageArchives, {
-    data: data,
-    onRefresh: refreshFinances,
-    onDirty: setDirty
-  }), page === "liens" && React.createElement(PageLiens, null));
+  if (!raw) {
+    return /*#__PURE__*/React.createElement("div", {
+      id: "loading"
+    }, erreur ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", null, "Impossible de charger les données."), /*#__PURE__*/React.createElement("div", {
+      className: "err"
+    }, erreur), /*#__PURE__*/React.createElement("button", {
+      className: "bouton",
+      style: {
+        marginTop: 20,
+        maxWidth: 240
+      },
+      onClick: () => recharger(false)
+    }, "Réessayer")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      className: "spin"
+    }), /*#__PURE__*/React.createElement("div", null, "Chargement des comptes…")));
+  }
+  const horsLigne = erreur && maj ? 'Hors ligne : données du ' + maj.toLocaleDateString('fr-FR', {
+    day: 'numeric',
+    month: 'long'
+  }) + '.' : null;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "app",
+    onTouchStart: debut,
+    onTouchEnd: fin
+  }, /*#__PURE__*/React.createElement("main", null, page === 'accueil' && /*#__PURE__*/React.createElement(PageAccueil, {
+    d: d,
+    aujourdhui: aujourdhui,
+    horsLigne: horsLigne,
+    onMenu: () => setMenu(true),
+    onGoMois: ouvrirMois,
+    onGoHist: () => allerVers('historique')
+  }), page === 'mois' && /*#__PURE__*/React.createElement(PageMois, {
+    d: d,
+    mois: mois,
+    changerMois: changerMois,
+    dirty: dirty,
+    setDirty: setDirty,
+    recharger: recharger,
+    notifier: notifier
+  }), page === 'historique' && /*#__PURE__*/React.createElement(PageHistorique, {
+    d: d,
+    onGoMois: ouvrirMois
+  })), /*#__PURE__*/React.createElement("nav", {
+    className: "onglets",
+    "aria-label": "Navigation principale"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "in"
+  }, ONGLETS.map(o => /*#__PURE__*/React.createElement("button", {
+    key: o.id,
+    "aria-current": page === o.id ? 'page' : undefined,
+    onClick: () => o.id === 'mois' && page !== 'mois' ? ouvrirMois(ymDe(aujourdhui)) : allerVers(o.id)
+  }, o.id === 'accueil' && /*#__PURE__*/React.createElement(Ico, {
+    d: I.maison,
+    size: 24
+  }), o.id === 'mois' && /*#__PURE__*/React.createElement(IcoCal, null), o.id === 'historique' && /*#__PURE__*/React.createElement(Ico, {
+    d: I.histo,
+    size: 24
+  }), o.label)))), menu && /*#__PURE__*/React.createElement(FeuilleMenu, {
+    d: d,
+    onClose: () => setMenu(false),
+    onRefresh: () => recharger(false),
+    theme: theme,
+    setTheme: setThemeState,
+    maj: maj,
+    onRestaurer: restaurer,
+    chargement: chargement
+  }), toast && /*#__PURE__*/React.createElement("div", {
+    className: 'toast' + (toast.err ? ' err' : ''),
+    role: "status"
+  }, toast.txt));
 }
-ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App, null));
+ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(App, null));
