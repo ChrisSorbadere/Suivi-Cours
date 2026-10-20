@@ -243,6 +243,11 @@
       .menu-sous .it { display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:14px; }
       .menu-sous button { min-height:36px; padding:0 12px; border-radius:10px; border:1px solid var(--chipLine); background:var(--chip); color:var(--chipInk); font-size:12px; font-weight:700; }
 
+      .virement { display:flex; flex-direction:column; gap:4px; padding:14px 16px; background:var(--chip); border-color:var(--chipLine); }
+      .virement.compact { border:1px solid var(--chipLine); border-radius:14px; }
+      .virement .v-titre { display:flex; align-items:center; gap:8px; font-size:14px; font-weight:700; color:var(--chipInk); }
+      .virement .v-mt { font-size:18px; font-weight:800; color:var(--barOn); white-space:nowrap; }
+      .tag-ponct { font-size:11px; font-weight:700; color:var(--pending); background:var(--pendingBg); border-radius:999px; padding:3px 8px; white-space:nowrap; }
       .toast { position:fixed; left:50%; transform:translateX(-50%); bottom:calc(150px + env(safe-area-inset-bottom)); z-index:60;
                background:var(--ink); color:var(--bg); padding:12px 18px; border-radius:14px; font-size:14px; font-weight:600;
                max-width:calc(100% - 32px); box-shadow:0 6px 20px rgba(0,0,0,0.25); }
@@ -275,7 +280,7 @@
       });
     </script>
 
-    <script src="./app.js?v=6.0"></script>
+    <script src="./app.js?v=6.2"></script>
 
     <script>
       if ('serviceWorker' in navigator) {

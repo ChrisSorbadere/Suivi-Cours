@@ -5,7 +5,7 @@ const {
   useRef,
   useMemo
 } = React;
-const APP_VERSION = 'v6.0';
+const APP_VERSION = 'v6.2';
 const API_URL = 'https://script.google.com/macros/s/AKfycbxyKJD9etJlzioM09crYIGHXqxNGZXq0-jadNDz3YMGMYAoZfeZ4dNmNsdne4vilEtUHw/exec';
 const COMPTES = ['Compte courant', 'Épargne France', 'Épargne Espagne'];
 const LIENS = {
@@ -15,6 +15,13 @@ const LIENS = {
 const CLE_CACHE = 'comptes-v6';
 const CLE_ANCIENNE = 'suivi-cours-donnees';
 const CLE_THEME = 'comptes-theme';
+const PREFIXE_PONCT = 'Ponctuel : ';
+function estPonctuel(nom) {
+  return String(nom).indexOf(PREFIXE_PONCT) === 0;
+}
+function libelle(nom) {
+  return estPonctuel(nom) ? nom.slice(PREFIXE_PONCT.length) + ' (ponctuel)' : nom;
+}
 const PAL_REV = ['var(--rev)', 'var(--rev2)', 'var(--rev3)', 'var(--rev4)', 'var(--rev5)'];
 const PAL_DEP = ['var(--dep)', 'var(--dep2)', 'var(--dep3)', 'var(--dep4)'];
 
@@ -114,6 +121,9 @@ function analyser(raw) {
   cats.forEach(c => {
     typeDe[c.nom] = c.type;
   });
+  arch.forEach(a => {
+    if (estPonctuel(a.categorie)) typeDe[a.categorie] = 'depense';
+  });
   const parMois = {};
   const fiche = m => parMois[m] || (parMois[m] = {
     rev: 0,
@@ -211,6 +221,35 @@ async function apiPost(action, payload) {
   return json.result;
 }
 
+/* ---------- Virement vers l'Espagne ---------- */
+
+function estLoyersFrance(nom) {
+  return /loyer/i.test(nom) && /france/i.test(nom);
+}
+function CarteVirement({
+  loyers,
+  dep,
+  compact
+}) {
+  const v = loyers - dep;
+  return /*#__PURE__*/React.createElement("section", {
+    className: compact ? 'virement compact' : 'carte virement',
+    "aria-label": "Virement vers l'Espagne"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ligne-tete"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "v-titre"
+  }, /*#__PURE__*/React.createElement(Ico, {
+    d: I.fleche,
+    size: 18,
+    color: "var(--barOn)"
+  }), " À virer en Espagne"), /*#__PURE__*/React.createElement("span", {
+    className: "v-mt"
+  }, v > 0 ? eur(v) : '0,00 €')), /*#__PURE__*/React.createElement("div", {
+    className: "petit"
+  }, "Loyers France ", eur(loyers), " − dépenses ", eur(dep), v < 0 ? ' : rien à virer, il manque ' + eur(-v) + ' en France.' : ''));
+}
+
 /* ---------- Icônes ---------- */
 
 function Ico({
@@ -248,7 +287,8 @@ const I = {
   externe: 'M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5',
   lune: 'M21 13A9 9 0 1 1 11 3a7 7 0 0 0 10 10z',
   maison: 'M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z',
-  histo: 'M3 20.5h18M6 17v-6M11 17V6M16 17v-4'
+  histo: 'M3 20.5h18M6 17v-6M11 17V6M16 17v-4',
+  fleche: 'M4 12h15M13 6l6 6-6 6'
 };
 function IcoMenu() {
   return /*#__PURE__*/React.createElement(Ico, {
@@ -359,7 +399,7 @@ function Repartition({
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     className: "pile",
     role: "img",
-    "aria-label": cats.map(c => c.nom + ' ' + eur(c.v)).join(', ')
+    "aria-label": cats.map(c => libelle(c.nom) + ' ' + eur(c.v)).join(', ')
   }, cats.map((c, i) => /*#__PURE__*/React.createElement("span", {
     key: c.nom,
     style: {
@@ -378,7 +418,7 @@ function Repartition({
     }
   }), /*#__PURE__*/React.createElement("span", {
     className: "nom"
-  }, c.nom), /*#__PURE__*/React.createElement("span", {
+  }, libelle(c.nom)), /*#__PURE__*/React.createElement("span", {
     className: "mt"
   }, eur(c.v)), /*#__PURE__*/React.createElement("span", {
     className: "pc"
@@ -432,7 +472,11 @@ function CarteMois({
     className: "val"
   }, eurSigne(f.rev - f.dep)))), !f.dep && /*#__PURE__*/React.createElement("div", {
     className: "petit"
-  }, "Dépenses non saisies pour ce mois."), rev.length > 0 && /*#__PURE__*/React.createElement(Repartition, {
+  }, "Dépenses non saisies pour ce mois."), /*#__PURE__*/React.createElement(CarteVirement, {
+    compact: true,
+    loyers: Object.keys(f.cats).filter(estLoyersFrance).reduce((a, c) => a + f.cats[c], 0),
+    dep: f.dep
+  }), rev.length > 0 && /*#__PURE__*/React.createElement(Repartition, {
     cats: rev,
     pal: PAL_REV
   }), dep.length > 0 && /*#__PURE__*/React.createElement(Repartition, {
@@ -617,6 +661,8 @@ function PageMois({
   const [reconduit, setReconduit] = useState(null);
   const [edit, setEdit] = useState(null);
   const [ajout, setAjout] = useState(null);
+  const [ponct, setPonct] = useState([]);
+  const [editPonct, setEditPonct] = useState(null);
   const [saving, setSaving] = useState(false);
   const etat = useRef({
     mois: null,
@@ -659,6 +705,12 @@ function PageMois({
       });
       return;
     }
+    // Les dépenses ponctuelles ne sont jamais reconduites
+    setPonct(d.arch.filter(x => x.mois === mois && estPonctuel(x.categorie)).map((x, i) => ({
+      id: 'p' + i,
+      nom: x.categorie.slice(PREFIXE_PONCT.length),
+      montant: x.montant
+    })));
     if (aDesDonnees || !source) {
       const r = valeursDe(mois);
       setVals(r.v);
@@ -672,7 +724,9 @@ function PageMois({
     }
   }, [mois, d]);
   const totRev = revenus.reduce((a, c) => a + num(vals[c.nom]), 0);
-  const totDep = depenses.reduce((a, c) => a + num(vals[c.nom]), 0);
+  const totPonct = ponct.reduce((a, p) => a + num(p.montant), 0);
+  const totDep = depenses.reduce((a, c) => a + num(vals[c.nom]), 0) + totPonct;
+  const loyersFr = revenus.filter(c => estLoyersFrance(c.nom)).reduce((a, c) => a + num(vals[c.nom]), 0);
   const soldesRemplis = COMPTES.some(c => !vide(sold[c]));
   const patrimoine = COMPTES.reduce((a, c) => a + num(sold[c]), 0);
   function repartirDeZero() {
@@ -686,8 +740,19 @@ function PageMois({
     });
     setVals(v);
     setSold(s);
+    setPonct([]);
     setReconduit(null);
     setDirty(true);
+  }
+  function validerPonct(p) {
+    setPonct(l => l.some(x => x.id === p.id) ? l.map(x => x.id === p.id ? p : x) : l.concat([p]));
+    setDirty(true);
+    setEditPonct(null);
+  }
+  function supprimerPonct(id) {
+    setPonct(l => l.filter(x => x.id !== id));
+    setDirty(true);
+    setEditPonct(null);
   }
   function reference(e) {
     if (!source) return null;
@@ -714,7 +779,11 @@ function PageMois({
         montant: num(vals[c.nom])
       }));
       // Conserve les montants déjà enregistrés des lignes masquées ou inconnues
-      d.arch.filter(a => a.mois === mois && !actives.some(c => c.nom === a.categorie)).forEach(a => lignes.push({
+      ponct.filter(p => p.nom.trim() && num(p.montant) !== 0).forEach(p => lignes.push({
+        categorie: PREFIXE_PONCT + p.nom.trim(),
+        montant: num(p.montant)
+      }));
+      d.arch.filter(a => a.mois === mois && !estPonctuel(a.categorie) && !actives.some(c => c.nom === a.categorie)).forEach(a => lignes.push({
         categorie: a.categorie,
         montant: a.montant
       }));
@@ -860,17 +929,51 @@ function PageMois({
         nom: c.nom,
         type: c.type
       })
-    })), /*#__PURE__*/React.createElement("button", {
+    })), type === 'depense' && ponct.map((p, i) => /*#__PURE__*/React.createElement("button", {
+      key: p.id,
+      className: "rang",
+      onClick: () => setEditPonct(p),
+      style: !liste.length && i === 0 ? {
+        borderTop: 'none'
+      } : null
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "pt",
+      style: {
+        background: 'var(--dep2)'
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      className: "nom"
+    }, p.nom), /*#__PURE__*/React.createElement("span", {
+      className: "tag-ponct"
+    }, "ponctuel"), /*#__PURE__*/React.createElement("span", {
+      className: "mt"
+    }, eur(num(p.montant))), /*#__PURE__*/React.createElement(Ico, {
+      d: I.droite,
+      size: 18,
+      color: "var(--ink4)"
+    }))), /*#__PURE__*/React.createElement("button", {
       className: "rang ajout",
       onClick: () => setAjout(type),
-      style: liste.length ? null : {
+      style: liste.length || type === 'depense' && ponct.length ? null : {
         borderTop: 'none'
       }
     }, /*#__PURE__*/React.createElement(Ico, {
       d: I.plus,
       size: 18,
       sw: 2.2
-    }), "Ajouter une ligne")));
+    }), "Ajouter une ligne"), type === 'depense' && /*#__PURE__*/React.createElement("button", {
+      className: "rang ajout",
+      onClick: () => setEditPonct({
+        id: 'n' + Date.now(),
+        nom: '',
+        montant: '',
+        nouveau: true
+      })
+    }, /*#__PURE__*/React.createElement(Ico, {
+      d: I.plus,
+      size: 18,
+      sw: 2.2
+    }), "Dépense ponctuelle")));
   }
   return /*#__PURE__*/React.createElement("div", {
     className: "page avec-barre"
@@ -919,7 +1022,10 @@ function PageMois({
     className: "lib"
   }, "Solde"), /*#__PURE__*/React.createElement("div", {
     className: "val"
-  }, eurSigne(totRev - totDep)))), Section({
+  }, eurSigne(totRev - totDep)))), /*#__PURE__*/React.createElement(CarteVirement, {
+    loyers: loyersFr,
+    dep: totDep
+  }), Section({
     titre: 'Revenus',
     total: totRev,
     cls: 'c-rev',
@@ -975,6 +1081,12 @@ function PageMois({
     onClose: () => setEdit(null),
     onValider: valider,
     onMasquer: edit.kind === 'cat' ? () => masquer(edit.nom) : null
+  }), editPonct && /*#__PURE__*/React.createElement(FeuillePonctuel, {
+    p: editPonct,
+    mois: mois,
+    onClose: () => setEditPonct(null),
+    onValider: validerPonct,
+    onSupprimer: editPonct.nouveau ? null : () => supprimerPonct(editPonct.id)
   }), ajout && /*#__PURE__*/React.createElement(FeuilleAjout, {
     type: ajout,
     onClose: () => setAjout(null),
@@ -1119,6 +1231,146 @@ function FeuilleSaisie({
       fontSize: 12
     }
   }, "Les montants déjà enregistrés restent dans l'historique.")))));
+}
+function FeuillePonctuel({
+  p,
+  mois,
+  onClose,
+  onValider,
+  onSupprimer
+}) {
+  const [nom, setNom] = useState(p.nom);
+  const [txt, setTxt] = useState(pourSaisie(p.montant));
+  const refNom = useRef(null),
+    refMt = useRef(null);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const el = p.nouveau ? refNom.current : refMt.current;
+      if (el) {
+        el.focus();
+        if (!p.nouveau) el.select();
+      }
+    }, 60);
+    return () => clearTimeout(t);
+  }, []);
+  const ok = nom.trim() && num(txt) !== 0;
+  return /*#__PURE__*/React.createElement(Feuille, {
+    onClose: onClose,
+    labelId: "titre-ponct"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ligne-tete",
+    style: {
+      alignItems: 'flex-start'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 3,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    id: "titre-ponct"
+  }, p.nouveau ? 'Dépense ponctuelle' : p.nom), /*#__PURE__*/React.createElement("span", {
+    className: "petit"
+  }, "Uniquement en ", moisLong(mois), " · non reconduite")), /*#__PURE__*/React.createElement("button", {
+    className: "rond",
+    style: {
+      background: 'var(--surface2)',
+      border: 'none'
+    },
+    onClick: onClose,
+    "aria-label": "Fermer"
+  }, /*#__PURE__*/React.createElement(Ico, {
+    d: I.croix,
+    size: 18,
+    sw: 2.2
+  }))), /*#__PURE__*/React.createElement("form", {
+    onSubmit: e => {
+      e.preventDefault();
+      if (ok) onValider({
+        id: p.id,
+        nom: nom.trim(),
+        montant: txt.trim()
+      });
+    },
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    htmlFor: "nom-ponct",
+    style: {
+      fontSize: 13,
+      fontWeight: 600,
+      color: 'var(--ink2)'
+    }
+  }, "Libellé"), /*#__PURE__*/React.createElement("input", {
+    id: "nom-ponct",
+    ref: refNom,
+    className: "champ-texte",
+    value: nom,
+    onChange: e => setNom(e.target.value),
+    placeholder: "Ex. : Plomberie",
+    autoComplete: "off"
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    htmlFor: "mt-ponct",
+    style: {
+      fontSize: 13,
+      fontWeight: 600,
+      color: 'var(--ink2)'
+    }
+  }, "Montant"), /*#__PURE__*/React.createElement("div", {
+    className: "champ"
+  }, /*#__PURE__*/React.createElement("input", {
+    id: "mt-ponct",
+    ref: refMt,
+    type: "text",
+    inputMode: "decimal",
+    autoComplete: "off",
+    enterKeyHint: "done",
+    value: txt,
+    onChange: e => setTxt(nettoyer(e.target.value)),
+    placeholder: "0,00"
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "eur"
+  }, "€"))), /*#__PURE__*/React.createElement("div", {
+    className: "deux"
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "bouton second",
+    onClick: onClose
+  }, "Annuler"), /*#__PURE__*/React.createElement("button", {
+    type: "submit",
+    className: "bouton",
+    disabled: !ok
+  }, "Valider"))), onSupprimer && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "sep"
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "masquer",
+    onClick: onSupprimer
+  }, /*#__PURE__*/React.createElement(Ico, {
+    d: I.croix,
+    size: 20
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 15,
+      fontWeight: 700
+    }
+  }, "Supprimer cette dépense"))));
 }
 function FeuilleAjout({
   type,

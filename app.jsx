@@ -1,17 +1,141 @@
-const { useState, useEffect, useCallback } = React;
+// Comptes — v6.0 (source JSX, compilée en app.js)
+const { useState, useEffect, useRef, useMemo } = React;
 
-const APP_VERSION = "v4.2";
+const APP_VERSION = 'v6.2';
+const API_URL = 'https://script.google.com/macros/s/AKfycbxyKJD9etJlzioM09crYIGHXqxNGZXq0-jadNDz3YMGMYAoZfeZ4dNmNsdne4vilEtUHw/exec';
+const COMPTES = ['Compte courant', 'Épargne France', 'Épargne Espagne'];
+const LIENS = {
+  nominas: 'https://docs.google.com/spreadsheets/d/1qFAGMnfFkznxkckuF5eGgY0XSo9qWAGao1vi_e5rkfw/edit',
+  impots: 'https://docs.google.com/spreadsheets/d/1jThZTb0tiJE__FGkaNk9M_Qflk4QBk3tpwCq7f7z5gg/edit'
+};
+const CLE_CACHE = 'comptes-v6';
+const CLE_ANCIENNE = 'suivi-cours-donnees';
+const CLE_THEME = 'comptes-theme';
+const PREFIXE_PONCT = 'Ponctuel : ';
+function estPonctuel(nom) { return String(nom).indexOf(PREFIXE_PONCT) === 0; }
+function libelle(nom) { return estPonctuel(nom) ? nom.slice(PREFIXE_PONCT.length) + ' (ponctuel)' : nom; }
+const PAL_REV = ['var(--rev)', 'var(--rev2)', 'var(--rev3)', 'var(--rev4)', 'var(--rev5)'];
+const PAL_DEP = ['var(--dep)', 'var(--dep2)', 'var(--dep3)', 'var(--dep4)'];
 
-// ── API Apps Script ───────────────────────────────────────────────────────────
-const API_URL = "https://script.google.com/macros/s/AKfycbxiOA_ZhZFg1FSWf7JEII1xUbJNutGek20sg17Vr5_sWwPsTj3AI1VKim803oo7BGYGPg/exec";
+/* ---------- Dates et nombres ---------- */
 
-// Comptes d'épargne suivis (patrimoine)
-const FIN_COMPTES = ['Épargne France', 'Épargne Espagne'];
+const MOIS_L = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
+const MOIS_C = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
+const JOURS = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'];
 
-/**
- * Envoi de données vers Apps Script.
- * Content-Type text/plain : évite le pre-flight CORS que Apps Script ne gère pas.
- */
+function ymDe(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); }
+function ymAjoute(m, n) {
+  const y = +m.slice(0, 4), mm = +m.slice(5, 7);
+  return ymDe(new Date(y, mm - 1 + n, 1));
+}
+function moisNom(m) { return MOIS_L[+m.slice(5, 7) - 1]; }
+function moisLong(m) { return moisNom(m) + ' ' + m.slice(0, 4); }
+function moisTitre(m) { const s = moisLong(m); return s.charAt(0).toUpperCase() + s.slice(1); }
+function moisCourt(m) { return MOIS_C[+m.slice(5, 7) - 1]; }
+function finDeMois(m) {
+  const y = +m.slice(0, 4), mm = +m.slice(5, 7);
+  return new Date(y, mm, 0).getDate() + ' ' + moisNom(m);
+}
+function estMois(s) { return /^\d{4}-\d{2}$/.test(s); }
+
+function num(v) {
+  if (v === '' || v === null || v === undefined) return 0;
+  if (typeof v === 'number') return isNaN(v) ? 0 : v;
+  const n = parseFloat(String(v).replace(/[\s  €]/g, '').replace(',', '.'));
+  return isNaN(n) ? 0 : n;
+}
+function vide(v) { return v === '' || v === null || v === undefined; }
+function eur(v) {
+  return (Math.round(v * 100) / 100).toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €';
+}
+function eurSigne(v) { return (v > 0 ? '+' : v < 0 ? '−' : '') + eur(Math.abs(v)); }
+function pourSaisie(v) {
+  if (vide(v)) return '';
+  if (typeof v === 'number') return v.toFixed(2).replace('.', ',');
+  return String(v);
+}
+function nettoyer(v) { return String(v).replace(/[^\d.,-]/g, ''); }
+function capital(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+
+/* ---------- Données ---------- */
+
+function moisTexte(v) {
+  if (v instanceof Date) return ymDe(v);
+  const s = String(v === null || v === undefined ? '' : v).trim();
+  if (estMois(s)) return s;
+  const d = new Date(s);
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s) && !isNaN(d)) return ymDe(d);
+  return s;
+}
+
+function analyser(raw) {
+  const r = raw || {};
+  const lignes = (t) => (t || []).slice(1).filter((x) => x && String(x[0]).trim());
+  const cats = lignes(r.finCategories).map((x) => ({
+    nom: String(x[0]).trim(),
+    type: String(x[1]).trim() === 'depense' ? 'depense' : 'revenu',
+    actif: x[2] !== false && String(x[2]).toUpperCase() !== 'FALSE'
+  }));
+  const arch = lignes(r.finArchives).map((x) => ({ mois: moisTexte(x[0]), categorie: String(x[1]).trim(), montant: num(x[2]) }))
+    .filter((a) => estMois(a.mois));
+  const sold = lignes(r.finSoldes).map((x) => ({ mois: moisTexte(x[0]), compte: String(x[1]).trim(), montant: num(x[2]) }))
+    .filter((s) => estMois(s.mois));
+
+  const typeDe = {};
+  cats.forEach((c) => { typeDe[c.nom] = c.type; });
+  arch.forEach((a) => { if (estPonctuel(a.categorie)) typeDe[a.categorie] = 'depense'; });
+
+  const parMois = {};
+  const fiche = (m) => parMois[m] || (parMois[m] = { rev: 0, dep: 0, cats: {}, soldes: null });
+  arch.forEach((a) => {
+    const f = fiche(a.mois);
+    f.cats[a.categorie] = (f.cats[a.categorie] || 0) + a.montant;
+    if ((typeDe[a.categorie] || 'revenu') === 'depense') f.dep += a.montant; else f.rev += a.montant;
+  });
+  sold.forEach((s) => {
+    const f = fiche(s.mois);
+    if (!f.soldes) f.soldes = {};
+    f.soldes[s.compte] = (f.soldes[s.compte] || 0) + s.montant;
+  });
+  const moisListe = Object.keys(parMois).sort();
+  const moisArch = Array.from(new Set(arch.map((a) => a.mois))).sort();
+  const moisSoldes = moisListe.filter((m) => parMois[m].soldes);
+  return { cats, arch, sold, typeDe, parMois, moisListe, moisArch, moisSoldes };
+}
+
+function dernierAvant(d, cible) {
+  let res = null;
+  d.moisListe.forEach((m) => { if (m < cible) res = m; });
+  return res;
+}
+
+function lireCache() {
+  try {
+    const brut = localStorage.getItem(CLE_CACHE);
+    if (brut) { const o = JSON.parse(brut); if (o && o.raw) return o; }
+    const ancien = localStorage.getItem(CLE_ANCIENNE);
+    if (ancien) {
+      const o = JSON.parse(ancien);
+      if (o && o.raw && o.raw.finCategories) {
+        return { raw: { finCategories: o.raw.finCategories, finArchives: o.raw.finArchives, finSoldes: o.raw.finSoldes }, at: o.at };
+      }
+    }
+  } catch (e) { /* stockage indisponible */ }
+  return null;
+}
+function ecrireCache(raw) {
+  try {
+    localStorage.setItem(CLE_CACHE, JSON.stringify({ raw: raw, at: Date.now() }));
+    localStorage.removeItem(CLE_ANCIENNE);
+  } catch (e) { /* sans conséquence */ }
+}
+
+async function apiGet() {
+  const res = await fetch(API_URL + '?only=fin');
+  const raw = await res.json();
+  if (raw.error) throw new Error(raw.error);
+  return { finCategories: raw.finCategories, finArchives: raw.finArchives, finSoldes: raw.finSoldes };
+}
 async function apiPost(action, payload) {
   const res = await fetch(API_URL, {
     method: 'POST',
@@ -23,1727 +147,1077 @@ async function apiPost(action, payload) {
   return json.result;
 }
 
-/** "2026-08" -> "août 2026" */
-function moisLisible(ym) {
-  const MM = ["janvier","février","mars","avril","mai","juin","juillet","août","septembre","octobre","novembre","décembre"];
-  const m = String(ym).match(/^(\d{4})-(\d{2})$/);
-  if (!m) return String(ym);
-  return MM[(+m[2]) - 1] + ' ' + m[1];
+/* ---------- Virement vers l'Espagne ---------- */
+
+function estLoyersFrance(nom) { return /loyer/i.test(nom) && /france/i.test(nom); }
+
+function CarteVirement({ loyers, dep, compact }) {
+  const v = loyers - dep;
+  return (
+    <section className={compact ? 'virement compact' : 'carte virement'} aria-label="Virement vers l'Espagne">
+      <div className="ligne-tete">
+        <span className="v-titre"><Ico d={I.fleche} size={18} color="var(--barOn)" /> À virer en Espagne</span>
+        <span className="v-mt">{v > 0 ? eur(v) : '0,00 €'}</span>
+      </div>
+      <div className="petit">
+        Loyers France {eur(loyers)} − dépenses {eur(dep)}
+        {v < 0 ? ' : rien à virer, il manque ' + eur(-v) + ' en France.' : ''}
+      </div>
+    </section>
+  );
 }
 
-/** N'autorise que chiffres, virgule/point et signe moins pendant la saisie */
-function nettoyerSaisie(v) {
-  return String(v).replace(/[^\d.,-]/g, '');
+/* ---------- Icônes ---------- */
+
+function Ico({ d, size = 22, sw = 2, children, color = 'currentColor' }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={sw}
+      strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
+      {d ? <path d={d} /> : children}
+    </svg>
+  );
+}
+const I = {
+  gauche: 'm15 6-6 6 6 6',
+  droite: 'm9 6 6 6-6 6',
+  croix: 'M6 6l12 12M18 6 6 18',
+  plus: 'M12 5v14M5 12h14',
+  check: 'm5 12.5 4.5 4.5L19 7.5',
+  refresh: 'M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7',
+  oeil: 'M3 3l18 18M10.6 5.1A9.7 9.7 0 0 1 12 5c5 0 9 4.5 10 7-0.4 1-1.2 2.3-2.4 3.5M6.6 6.6C4.4 8 2.8 10.2 2 12c1 2.5 5 7 10 7 1.8 0 3.4-0.6 4.8-1.4',
+  externe: 'M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5',
+  lune: 'M21 13A9 9 0 1 1 11 3a7 7 0 0 0 10 10z',
+  maison: 'M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z',
+  histo: 'M3 20.5h18M6 17v-6M11 17V6M16 17v-4',
+  fleche: 'M4 12h15M13 6l6 6-6 6'
+};
+function IcoMenu() {
+  return <Ico size={20}><path d="M4 7h16M4 12h16M4 17h16" /></Ico>;
+}
+function IcoCal({ size = 24 }) {
+  return <Ico size={size}><rect x="3" y="4.5" width="18" height="16" rx="2.5" /><path d="M3 9.5h18M8 3v3M16 3v3" /></Ico>;
+}
+function IcoInfo({ color }) {
+  return <Ico size={20} color={color}><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></Ico>;
+}
+function IcoTableur() {
+  return <Ico color="var(--barOn)"><rect x="4" y="3" width="16" height="18" rx="2" /><path d="M4 9h16M4 15h16M10 9v12" /></Ico>;
+}
+function IcoDoc() {
+  return <Ico color="var(--barOn)"><path d="M7 3h7l4 4v14H7z" /><path d="M14 3v4h4M10 12h5M10 16h5" /></Ico>;
 }
 
-/** Convertit une saisie en nombre ("1 234,56" -> 1234.56) */
-function num(v) {
-  if (v === '' || v === null || v === undefined) return 0;
-  const n = parseFloat(String(v).replace(/\s/g, '').replace(',', '.'));
-  return isNaN(n) ? 0 : n;
+/* ---------- Feuille (bottom sheet) ---------- */
+
+function Feuille({ onClose, fond, children, labelId }) {
+  const fermer = useRef(onClose);
+  fermer.current = onClose;
+  useEffect(() => {
+    function k(e) { if (e.key === 'Escape') fermer.current(); }
+    window.addEventListener('keydown', k);
+    const avant = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { window.removeEventListener('keydown', k); document.body.style.overflow = avant; };
+  }, []);
+  return (
+    <>
+      <div className="scrim" onClick={onClose} />
+      <div className={'feuille' + (fond ? ' fond' : '')} role="dialog" aria-modal="true" aria-labelledby={labelId}
+        style={{ left: 0, right: 0 }}>
+        <div className="poignee" />
+        {children}
+      </div>
+    </>
+  );
 }
 
-/** Mois courant au format "AAAA-MM" */
-function moisCourantYM() {
-  const d = new Date();
-  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+/* ---------- Accueil ---------- */
+
+function Repartition({ cats, pal }) {
+  const total = cats.reduce((a, c) => a + c.v, 0);
+  if (total <= 0) return null;
+  return (
+    <>
+      <div className="pile" role="img" aria-label={cats.map((c) => libelle(c.nom) + ' ' + eur(c.v)).join(', ')}>
+        {cats.map((c, i) => <span key={c.nom} style={{ flexGrow: c.v, background: pal[i % pal.length] }} />)}
+      </div>
+      <div className="legende">
+        {cats.map((c, i) => (
+          <div className="it" key={c.nom}>
+            <span className="pt" style={{ background: pal[i % pal.length] }} />
+            <span className="nom">{libelle(c.nom)}</span>
+            <span className="mt">{eur(c.v)}</span>
+            <span className="pc">{(c.v / total * 100).toLocaleString('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} %</span>
+          </div>
+        ))}
+      </div>
+    </>
+  );
 }
 
-// Couleurs élèves par code
-const STUDENT_COLORS_MAP = {"1":"#FF6B6B","2":"#4ECDC4","3":"#45B7D1","4":"#96CEB4","5":"#FECA57","6":"#FF9F43","7":"#48DBFB","8":"#FF9FF3"};
-
-// Parse une durée depuis Apps Script
-// Apps Script exporte timedelta comme fraction de jour : 60min = 60/1440 = 0.04166...
-function parseDuration(val) {
-  if (!val) return 0;
-  if (typeof val === 'number') {
-    if (val < 1) return val * 24; // fraction de jour → heures (ex: 0.04166 → 1h)
-    if (val < 24) return val;     // déjà en heures
-    return val / 60;              // minutes → heures
-  }
-  return 0;
+function CarteMois({ d, m, onVoir, onModifier }) {
+  const f = d.parMois[m] || { rev: 0, dep: 0, cats: {} };
+  const detail = (type) => Object.keys(f.cats)
+    .filter((c) => (d.typeDe[c] || 'revenu') === type && f.cats[c] > 0)
+    .map((c) => ({ nom: c, v: f.cats[c] }))
+    .sort((a, b) => b.v - a.v);
+  const rev = detail('revenu');
+  const dep = detail('depense');
+  return (
+    <section className="carte" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div className="ligne-tete">
+        <h2>{moisTitre(m)}</h2>
+        <button className="lien" onClick={onModifier}>Modifier</button>
+      </div>
+      <div className="trio">
+        <div><div className="lib">Revenus</div><div className="val c-rev">{eur(f.rev)}</div></div>
+        <div><div className="lib">Dépenses</div><div className="val c-dep">{f.dep ? eur(f.dep) : '—'}</div></div>
+        <div><div className="lib">Solde</div><div className="val">{eurSigne(f.rev - f.dep)}</div></div>
+      </div>
+      {!f.dep && <div className="petit">Dépenses non saisies pour ce mois.</div>}
+      <CarteVirement compact
+        loyers={Object.keys(f.cats).filter(estLoyersFrance).reduce((a, c) => a + f.cats[c], 0)}
+        dep={f.dep} />
+      {rev.length > 0 && <Repartition cats={rev} pal={PAL_REV} />}
+      {dep.length > 0 && <Repartition cats={dep} pal={PAL_DEP} />}
+      <div><button className="lien" onClick={onVoir}>Voir l'historique <Ico d={I.droite} size={16} /></button></div>
+    </section>
+  );
 }
 
-// Parse une date depuis Apps Script
-// Apps Script exporte les dates en ISO UTC : "2026-03-05T17:00:00.000Z"
-// Pour avoir l'heure locale (CET = UTC+1 ou UTC+2), on ajoute 1h
-function parseDate(val) {
-  if (!val) return null;
-  if (val instanceof Date) return val;
-  const s = String(val);
-  // Format ISO UTC : "2026-03-05T17:00:00.000Z"
-  if (s.includes('T') && (s.endsWith('Z') || s.includes('+00'))) {
-    const d = new Date(s);
-    if (!isNaN(d)) {
-      // Ajouter 1h pour CET (approximation correcte pour l'Europe)
-      return new Date(d.getTime() + 60*60*1000);
-    }
-  }
-  // Format gviz : Date(year, month0, day, h, m)
-  const m = s.match(/Date\((\d+),(\d+),(\d+),?(\d*),?(\d*)/);
-  if (m) return new Date(+m[1], +m[2], +m[3], +(m[4]||0), +(m[5]||0));
-  // Format dd/MM/yyyy HH:mm
-  const p = s.match(/(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})/);
-  if (p) return new Date(+p[3], +p[2]-1, +p[1], +p[4], +p[5]);
-  return null;
-}
-
-// Transforme les données brutes du sheet en DATA structurée
-function parseSheetData(raw) {
-  const nomina = raw.nomina || [];
-  const recap  = raw.recap  || [];
-  const mois   = raw.mois   || [];
-  const moisM1 = raw.moisM1 || [];
-  const moisP1 = raw.moisP1 || [];
-
-  // ── NOMINA ──────────────────────────────────────────────────────────────────
-  // L1 : date du jour (col A), L2 : mois (col A)
-  const today = String(nomina[0]?.[0] || "").replace(/[^a-zA-Z0-9éèêëàâùûüôîïç\s]/gu, '').trim();
-  const month = String(nomina[1]?.[0] || "").trim();
-
-  // L24 (idx 23) : B=label, C=avgRate, D=presentH, E=presentE, F=futurH, G=futurE, H=totalH, I=totalE, K=actifs
-  // L4  (idx 3)  : col D = présent en minutes (105 = 1h45), col E = vide
-  // L8  (idx 7)  : TOTAL MOIS col D=totalH, col E=totalE
-  // L11 (idx 10) : mois prochain col D=nextH, col E=nextE
-
-  const presentH = nomina[23]?.[3] || 0;  // D24 = 5h
-  const presentE = nomina[23]?.[4] || 0;  // E24 = 105€
-  const futurH   = nomina[23]?.[5] || 0;  // F24 = 4h
-  const futurE   = nomina[23]?.[6] || 0;  // G24 = 105€
-  const totalH   = nomina[23]?.[7] || 0;  // H24 = 9h
-  const totalE   = nomina[23]?.[8] || 0;  // I24 = 210€
-  const nextH    = nomina[10]?.[3] || 0;  // D11 = 147h
-  const nextE    = nomina[10]?.[4] || 0;  // E11 = 1675€
-  const avgRate  = nomina[23]?.[2] || 0;  // C24 = 23.33
-  const actifs   = nomina[23]?.[10] || ""; // K24 = "Actifs : 2"
-
-  // Élèves lignes 15-23 (index 14-22) :
-  // Col A=N°, B=CLIENT, C=Tarif, D=H.Present, E=€Present, F=H.Futur, G=€Futur, H=H.Mois, I=€Mois
-  const students = nomina.slice(14, 23)
-    .filter(r => r[0] && typeof r[0] === 'number' && r[1])
-    .map(r => ({
-      code:     String(r[0]),
-      name:     String(r[1]).trim(),
-      rate:     r[2] || 0,
-      presentH: r[3] || 0,
-      presentE: r[4] || 0,
-      futurH:   r[5] || 0,
-      futurE:   r[6] || 0,
-      totalH:   r[7] || 0,
-      totalE:   r[8] || 0,
-      color:    STUDENT_COLORS_MAP[String(r[0])] || "#888",
-    }));
-
-  // Vérification : les valeurs L24 sont les bonnes (calculées par les formules Sheets)
-
-  // Mois -1 (col G=idx6, H=idx7, I=idx8) lignes 3-12
-  const m1rows = nomina.slice(2, 12).filter(r => r[6] && !String(r[6]).includes('TOTAL') && String(r[6]).length > 1);
-  const m1TotalE = nomina[11]?.[8] || 0;
-  const m1Label  = "Mois précédent";
-
-  // Mois +1 (col J=idx9, K=idx10, L=idx11)
-  const m2rows = nomina.slice(2, 12).filter(r => r[9] && !String(r[9]).includes('TOTAL') && String(r[9]).length > 1);
-  const m2TotalE = nomina[11]?.[11] || 0;
-
-  // ── RÉCAP ───────────────────────────────────────────────────────────────────
-  // Colonnes : A=DATE(idx0), B=HEURES(idx1), C=SALAIRE(idx2), D=NBRE(idx3), E=PRINCIPAL(idx4), F=%(idx5)
-  // L1 = header "DOSSIER DES PDF", L2 = headers colonnes → on skip 2 lignes
-  const history = recap.slice(2)
-    .filter(r => r[0] && (r[1] || r[2]))
-    .map(r => {
-      let d = r[0];
-      if (typeof d === 'string') {
-        // Format ISO UTC : "2025-03-31T22:00:00.000Z" → ajouter 2h pour CET
-        if (d.includes('T') && d.endsWith('Z')) {
-          const raw = new Date(d);
-          d = !isNaN(raw) ? new Date(raw.getTime() + 2*60*60*1000) : null;
-        } else {
-          // Format gviz Date(year,month0,...)
-          const m = d.match(/Date\((\d+),(\d+)/);
-          if (m) d = new Date(+m[1], +m[2], 1);
-        }
-      }
-      if (!(d instanceof Date) || isNaN(d)) return null;
-      // Salaire = col C (index 2)
-      const salary = typeof r[2] === 'number' ? r[2] : 0;
-      if (salary <= 0) return null;
-      return {
-        month:  d.toLocaleString('fr-FR', {month:'short', year:'numeric'}),
-        salary: salary,
-        hours:  typeof r[1] === 'number' ? r[1] : 0,
-        client: String(r[4] || '—'),
-      };
-    })
-    .filter(Boolean);
-
-  // ── GRAPH ───────────────────────────────────────────────────────────────────
-  // Colonnes : A=DATES, B=SALAIRES, C=LOYERS FRANCE, D=CHÔMAGE, E=TOTAL
-  const MOIS_FR = ["jan.","fév.","mars","avr.","mai","juin","juil.","août","sep.","oct.","nov.","déc."];
-
-  // Parseur de nombre ultra-robuste : gère 1692.78, "1692,78", "1 692,78 €", etc.
-  function parseNum(v) {
-    if (typeof v === 'number') return v;
-    if (v === null || v === undefined || v === '') return 0;
-    const cleaned = String(v)
-      .replace(/[€\s\u00A0\u202F]/g, '')  // retire €, espaces, espaces insécables
-      .replace(/\./g, m => m)              // garde les points
-      .replace(',', '.');                   // virgule décimale → point
-    const n = parseFloat(cleaned);
-    return isNaN(n) ? 0 : n;
-  }
-
-  // Parseur de libellé de mois : gère "MM/YYYY", Date ISO, Date gviz, ou Date JS
-  function parseMonthLabel(v) {
-    if (v === null || v === undefined || v === '') return null;
-    // Date JS native
-    if (v instanceof Date && !isNaN(v)) {
-      return v.toLocaleString('fr-FR', {month:'short', year:'numeric'});
-    }
-    const s = String(v).trim();
-    // Format "MM/YYYY" ou "M/YYYY"
-    let m = s.match(/^(\d{1,2})\/(\d{4})$/);
-    if (m) return `${MOIS_FR[(+m[1])-1]} ${m[2]}`;
-    // Format "MM/DD/YYYY" ou "DD/MM/YYYY" (on prend mois/année)
-    m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-    if (m) return `${MOIS_FR[(+m[1])-1]} ${m[3]}`;
-    // Format ISO UTC "2025-01-31T23:00:00.000Z" → +2h pour CET
-    if (s.includes('T') && s.endsWith('Z')) {
-      const d = new Date(s);
-      if (!isNaN(d)) {
-        const local = new Date(d.getTime() + 2*60*60*1000);
-        return local.toLocaleString('fr-FR', {month:'short', year:'numeric'});
-      }
-    }
-    // Format gviz "Date(2025,0,1)"
-    m = s.match(/Date\((\d+),(\d+)/);
-    if (m) return `${MOIS_FR[+m[2]]} ${m[1]}`;
-    // Dernier recours : tenter Date()
-    const d = new Date(s);
-    if (!isNaN(d)) return d.toLocaleString('fr-FR', {month:'short', year:'numeric'});
-    return null;
-  }
-
-  const graphRows = raw.graph || [];
-  const graph = graphRows.slice(1) // skip header
-    .map(r => {
-      if (!r || !r[0]) return null;
-      const label = parseMonthLabel(r[0]);
-      if (!label) return null;
-      const salaires = parseNum(r[1]);
-      const loyers   = parseNum(r[2]);
-      const chomage  = parseNum(r[3]);
-      let   total    = parseNum(r[4]);
-      // Si total absent mais composantes présentes, recalculer
-      if (total === 0 && (salaires > 0 || loyers > 0 || chomage > 0)) {
-        total = salaires + loyers + chomage;
-      }
-      return { month: label, salaires, loyers, chomage, total };
-    })
-    .filter(Boolean);
-
-  // ── DÉCLARER (revenu moyen mensuel par année) ────────────────────────────────
-  // Structure : idx0 = titre/totaux, idx1 = en-têtes, idx2 = totaux catégories, idx3+ = données mensuelles
-  // Colonnes par mois : A(0)=DATE, B(1)=Salaire, C(2)=Clients, D(3)=IFZ, E(4)=Loyers,
-  //                     F(5)=Loyers Espagne [EXCLU], G(6)=Chômage, H(7)=Kings, I(8)=Lycée,
-  //                     J(9)=Remb.Hacienda, K(10)=Classes perso, L(11)=Autres
-  // Calcul = (D+E) + (G+H+I+J+K+L) sommé sur les mois de l'année, ÷ (mois écoulés si année courante, sinon 12)
-  function extractYear(v) {
-    if (v === null || v === undefined || v === '') return null;
-    if (v instanceof Date && !isNaN(v)) return v.getFullYear();
-    const s = String(v).trim();
-    // ISO "2025-03-31T..."
-    let m = s.match(/^(\d{4})-/);
-    if (m) {
-      // ISO UTC fin de mois → peut basculer d'une année ; on ajoute 2h pour CET
-      const d = new Date(s);
-      if (!isNaN(d)) return new Date(d.getTime() + 2*60*60*1000).getFullYear();
-      return +m[1];
-    }
-    // Texte "janvier 2025" ou "01/2025"
-    m = s.match(/(\d{4})/);
-    if (m) return +m[1];
-    return null;
-  }
-
-  const declarer = raw.declarer || [];
-  const declRows = declarer.slice(3); // sauter titre + en-tête + totaux
-  const COLS_REVENU = [3, 4, 6, 7, 8, 9, 10, 11]; // D,E,G,H,I,J,K,L (exclut F=5=Loyers Espagne)
-
-  // Regrouper par année
-  const revenusParAnnee = {};
-  declRows.forEach(r => {
-    if (!r || !r[0]) return;
-    const year = extractYear(r[0]);
-    if (!year) return;
-    let somme = 0;
-    COLS_REVENU.forEach(ci => { somme += parseNum(r[ci]); });
-    if (!revenusParAnnee[year]) revenusParAnnee[year] = { total: 0, moisAvecDonnees: 0 };
-    revenusParAnnee[year].total += somme;
-    revenusParAnnee[year].moisAvecDonnees += 1;
+function Sparkline({ d, fin }) {
+  const mois = [];
+  for (let i = 11; i >= 0; i--) mois.push(ymAjoute(fin, -i));
+  const vals = mois.map((m) => (d.parMois[m] ? d.parMois[m].rev : 0));
+  const avecDonnees = mois.filter((m) => d.parMois[m] && d.parMois[m].rev > 0);
+  if (avecDonnees.length < 2) return null;
+  const W = 320, H = 90, P = 6;
+  const max = Math.max.apply(null, vals.concat([1]));
+  const pts = vals.map((v, i) => [P + i * (W - 2 * P) / 11, H - P - v / max * (H - 2 * P)]);
+  const line = pts.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+  const area = P + ',' + (H - P) + ' ' + line + ' ' + (W - P) + ',' + (H - P);
+  const moyenne = avecDonnees.reduce((a, m) => a + d.parMois[m].rev, 0) / avecDonnees.length;
+  let iMax = 0, iMin = -1;
+  vals.forEach((v, i) => {
+    if (v > vals[iMax]) iMax = i;
+    if (v > 0 && (iMin < 0 || v < vals[iMin])) iMin = i;
   });
-
-  const anneeActuelle = new Date().getFullYear();
-  const moisEcoules = new Date().getMonth() + 1; // 1-12
-  const moyenneParAnnee = {};
-  Object.keys(revenusParAnnee).forEach(y => {
-    const yNum = +y;
-    const diviseur = yNum === anneeActuelle ? moisEcoules : 12;
-    moyenneParAnnee[yNum] = {
-      total:    revenusParAnnee[y].total,
-      diviseur: diviseur,
-      moyenne:  diviseur > 0 ? revenusParAnnee[y].total / diviseur : 0,
-    };
-  });
-  const anneesDisponibles = Object.keys(moyenneParAnnee).map(Number).sort((a,b) => b - a);
-
-  // ── COURS ──────────────────────────────────────────────────────────────────
-  // Format Apps Script : col A = titre, col B = date "dd/MM/yyyy HH:mm", col C = durée (minutes), col D = code
-  function parseCourses(rows, isDone) {
-    const now = new Date();
-    return rows
-      .filter(r => r[0] && r[1] && r[3] && /^\d$/.test(String(r[3]).trim()))
-      .map(r => {
-        const d = parseDate(r[1]);
-        if (!d) return null;
-        // Durée : Apps Script exporte les timedelta en format ISO inutilisable
-        // On extrait la durée depuis le titre si possible (ex: "18h45-19h45" = 1h)
-        // Sinon on utilise 1h par défaut (toutes les séances sont d'1h)
-        let durationH = 1;
-        const titleMatch = String(r[0]).match(/(\d+)h(\d+)-(\d+)h(\d+)/);
-        if (titleMatch) {
-          const start = +titleMatch[1] * 60 + +titleMatch[2];
-          const end2  = +titleMatch[3] * 60 + +titleMatch[4];
-          durationH = (end2 - start) / 60;
-        }
-        const durMin = durationH * 60;
-        const end = new Date(d.getTime() + durMin * 60000);
-        const done = isDone !== undefined ? isDone : end <= now;
-        const code = String(r[3]).trim();
-        const st = students.find(s => s.code === code);
-        return {
-          code,
-          name: st?.name || `Élève ${code}`,
-          date: d.toLocaleDateString('fr-FR', {weekday:'short', day:'numeric', month:'short'}),
-          time: d.toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'}),
-          done,
-          durationH,
-        };
-      })
-      .filter(Boolean);
-  }
-
-  // ── FINANCES (Fin_Categories / Fin_Archives / Fin_Soldes) ───────────────────
-  // Feuilles en format long : une ligne = (mois, clé, montant)
-  const finCategories = (raw.finCategories || []).slice(1)
-    .filter(r => r && String(r[0]).trim())
-    .map(r => ({
-      nom:   String(r[0]).trim(),
-      type:  String(r[1]).trim() === 'depense' ? 'depense' : 'revenu',
-      actif: r[2] !== false && String(r[2]).toUpperCase() !== 'FALSE'
-    }));
-
-  const finArchives = (raw.finArchives || []).slice(1)
-    .filter(r => r && String(r[0]).trim())
-    .map(r => ({
-      mois:      String(r[0]).trim(),
-      categorie: String(r[1]).trim(),
-      montant:   parseNum(r[2])
-    }));
-
-  const finSoldes = (raw.finSoldes || []).slice(1)
-    .filter(r => r && String(r[0]).trim())
-    .map(r => ({
-      mois:    String(r[0]).trim(),
-      compte:  String(r[1]).trim(),
-      montant: parseNum(r[2])
-    }));
-
-  return {
-    today, month,
-    summary: {
-      presentH, presentE,
-      futurH,   futurE,
-      totalH,   totalE,
-      nextH, nextE,
-      avgRate: Math.round(avgRate * 100) / 100,
-      actifs: String(actifs),
-    },
-    students,
-    prevMonth: {
-      label: m1Label, total: m1TotalE,
-      items: m1rows.map(r => ({ name: String(r[6]), h: r[7]||0, e: r[8]||0 }))
-    },
-    nextMonth: {
-      label: "Mois prochain", total: m2TotalE,
-      items: m2rows.map(r => ({ name: String(r[9]), h: r[10]||0, e: r[11]||0 }))
-    },
-    courses: {
-      cur:  parseCourses(mois),
-      prev: parseCourses(moisM1, true),
-      next: parseCourses(moisP1, false),
-    },
-    history,
-    graph,
-    revenuMoyen: { parAnnee: moyenneParAnnee, annees: anneesDisponibles, anneeActuelle },
-    finCategories: finCategories,
-    finArchives:   finArchives,
-    finSoldes:     finSoldes,
-    updatedAt: raw.updatedAt || null,
-  };
-}
-
-// ── DATA FALLBACK (affiché pendant le chargement) ─────────────────────────────
-const DATA_FALLBACK = {
-  today: "Chargement…", month: "—",
-  summary: { presentH:0,presentE:0,futurH:0,futurE:0,totalH:0,totalE:0,nextH:0,nextE:0,avgRate:0,actifs:"—" },
-  students: [], prevMonth:{label:"—",total:0,items:[]}, nextMonth:{label:"—",total:0,items:[]},
-  courses:{cur:[],prev:[],next:[]}, history:[], graph:[],
-  revenuMoyen:{parAnnee:{},annees:[],anneeActuelle:new Date().getFullYear()},
-  finCategories:[], finArchives:[], finSoldes:[],
-};
-
-// ── HELPERS ───────────────────────────────────────────────────────────────────
-const fmtM = v => (v||0).toLocaleString("fr-FR",{minimumFractionDigits:2,maximumFractionDigits:2})+" €";
-const fmtH = h => { if(!h||h<=0) return "0h"; const hh=Math.floor(h),mm=Math.round((h-hh)*60); return `${hh}h${mm>0?String(mm).padStart(2,"0"):""}`; };
-
-// ── DESIGN SYSTEM ─────────────────────────────────────────────────────────────
-const C = {
-  bg:     "#D6DEE8",
-  white:  "#FFFFFF",
-  ink:    "#1A1A2E",
-  ink2:   "#4A4A6A",
-  ink3:   "#9090B0",
-  border: "#E8E8F0",
-  shadow: "0 2px 16px rgba(0,0,0,0.07)",
-  shadowHov: "0 6px 32px rgba(0,0,0,0.13)",
-};
-
-const STUDENT_COLORS = {
-  "1":"#FF6B6B","2":"#4ECDC4","3":"#45B7D1","4":"#96CEB4","5":"#FECA57",
-  "6":"#FF9F43","7":"#48DBFB","8":"#FF9FF3",
-};
-const sc = code => STUDENT_COLORS[code] || "#888";
-
-const globalCSS = `
-  @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=DM+Sans:wght@300;400;500;600&display=swap');
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { overscroll-behavior-y: contain; }
-  body { background: ${C.bg}; }
-  @keyframes fadeUp { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:translateY(0); } }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .fade-up { animation: fadeUp 0.4s ease both; }
-  .fade-up-2 { animation: fadeUp 0.4s 0.08s ease both; }
-  .fade-up-3 { animation: fadeUp 0.4s 0.16s ease both; }
-  .fade-up-4 { animation: fadeUp 0.4s 0.24s ease both; }
-  .card:hover { transform: translateY(-2px); box-shadow: ${C.shadowHov}; }
-  .tab-btn:hover { background: #f0f0f8; }
-  .nav-tab.active { border-bottom: 3px solid ${C.ink}; color: ${C.ink}; }
-  .nav-tab:hover:not(.active) { color: ${C.ink2}; }
-`;
-
-// ── COMPONENTS ────────────────────────────────────────────────────────────────
-
-function KpiCard({ label, value, sub, color, delay="" }) {
+  const dernier = pts[pts.length - 1];
   return (
-    <div className={`card fade-up${delay}`} style={{
-      background: C.white, borderRadius:16, padding:"20px 22px",
-      boxShadow: C.shadow, transition:"all .25s ease",
-      borderTop: `4px solid ${color}`,
-    }}>
-      <div style={{fontSize:11,fontFamily:"DM Sans",fontWeight:600,color:C.ink3,textTransform:"uppercase",letterSpacing:".1em",marginBottom:6}}>{label}</div>
-      <div style={{fontSize:26,fontFamily:"Playfair Display",fontWeight:700,color:C.ink,lineHeight:1}}>{value}</div>
-      {sub && <div style={{fontSize:12,color:C.ink3,marginTop:5,fontFamily:"DM Sans"}}>{sub}</div>}
-    </div>
+    <section className="carte" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <h2>Revenus sur 12 mois</h2>
+        <span className="petit">De {moisLong(mois[0])} à {moisLong(fin)}</span>
+      </div>
+      <svg viewBox={'0 0 ' + W + ' ' + H} width="100%" height="90" preserveAspectRatio="none" role="img"
+        aria-label={'Revenus mensuels de ' + moisLong(mois[0]) + ' à ' + moisLong(fin)}>
+        <polygon points={area} fill="var(--sparkFill)" />
+        <polyline points={line} fill="none" stroke="var(--spark)" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+        <circle cx={dernier[0]} cy={dernier[1]} r="4" fill="var(--spark)" />
+      </svg>
+      <div className="stats3">
+        <div><div className="lib">Moyenne</div><div className="val">{eur(moyenne)}</div></div>
+        <div><div className="lib">Plus haut · {moisCourt(mois[iMax])}</div><div className="val">{eur(vals[iMax])}</div></div>
+        <div><div className="lib">Plus bas · {iMin >= 0 ? moisCourt(mois[iMin]) : '—'}</div><div className="val">{iMin >= 0 ? eur(vals[iMin]) : '—'}</div></div>
+      </div>
+    </section>
   );
 }
 
-function StudentChip({ code, name, color, small }) {
-  return (
-    <span style={{
-      display:"inline-flex",alignItems:"center",gap:6,
-      background: color+"18", border:`1.5px solid ${color}44`,
-      borderRadius:20, padding: small?"3px 10px":"5px 14px",
-      fontFamily:"DM Sans", fontSize: small?10:12, fontWeight:600, color: color,
-    }}>
-      <span style={{width:7,height:7,borderRadius:"50%",background:color,flexShrink:0}}/>
-      {small ? code : `${code} · ${name}`}
-    </span>
-  );
-}
-
-function SectionTitle({ children, accent }) {
-  return (
-    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
-      {accent && <div style={{width:4,height:28,borderRadius:2,background:accent}}/>}
-      <h2 style={{fontFamily:"Playfair Display",fontSize:20,fontWeight:700,color:C.ink}}>{children}</h2>
-    </div>
-  );
-}
-
-// ── PAGE TABLEAU DE BORD ──────────────────────────────────────────────────────
-function PageAccueil({ data, onRefresh }) {
-  const s = data.summary;
-  const actifs = data.students.filter(s=>s.totalH>0);
-  const totalE = actifs.reduce((a,s)=>a+s.totalE,0);
-  const pct = s.totalH>0 ? Math.round((s.presentH/s.totalH)*100) : 0;
-
-  // Revenu moyen mensuel par année
-  const rm = data.revenuMoyen || { parAnnee:{}, annees:[], anneeActuelle:new Date().getFullYear() };
-  const [selYear, setSelYear] = useState(null);
-  const yearToShow = selYear || (rm.annees.length > 0 ? rm.annees[0] : rm.anneeActuelle);
-  const rmData = rm.parAnnee[yearToShow] || { moyenne:0, total:0, diviseur:12 };
+function PageAccueil({ d, aujourdhui, onMenu, onGoMois, onGoHist, horsLigne }) {
+  const courant = ymDe(aujourdhui);
+  const dateTxt = JOURS[aujourdhui.getDay()] + ' ' + aujourdhui.getDate() + ' ' + MOIS_L[aujourdhui.getMonth()];
+  const mSoldes = d.moisSoldes.length ? d.moisSoldes[d.moisSoldes.length - 1] : null;
+  const mPrec = d.moisSoldes.length > 1 ? d.moisSoldes[d.moisSoldes.length - 2] : null;
+  const total = (m) => COMPTES.concat(Object.keys((d.parMois[m] || {}).soldes || {}).filter((c) => COMPTES.indexOf(c) < 0))
+    .reduce((a, c) => a + ((d.parMois[m].soldes || {})[c] || 0), 0);
+  const courantSaisi = d.moisArch.indexOf(courant) >= 0;
+  const dernierArch = d.moisArch.filter((m) => m <= courant).pop() || null;
 
   return (
-    <div style={{padding:"32px 28px",maxWidth:980,margin:"0 auto"}}>
-
-      {/* Bloc revenu moyen mensuel + sélecteur d'année */}
-      {rm.annees.length > 0 && (
-        <div className="fade-up" style={{
-          background:C.white, borderRadius:20, padding:"22px 26px", marginBottom:20,
-          boxShadow:C.shadow, display:"flex", justifyContent:"space-between",
-          alignItems:"center", flexWrap:"wrap", gap:16,
-          borderLeft:`5px solid #96CEB4`,
-        }}>
-          <div>
-            <div style={{fontSize:11,fontFamily:"DM Sans",fontWeight:600,color:C.ink3,textTransform:"uppercase",letterSpacing:".1em",marginBottom:6}}>
-              Revenu moyen mensuel — {yearToShow}
-            </div>
-            <div style={{fontFamily:"Playfair Display",fontSize:32,fontWeight:900,color:C.ink,lineHeight:1}}>
-              {fmtM(rmData.moyenne)}
-            </div>
-            <div style={{fontSize:11,color:C.ink3,fontFamily:"DM Sans",marginTop:5}}>
-              {fmtM(rmData.total)} sur {rmData.diviseur} mois
-            </div>
-          </div>
-          <div style={{display:"flex",flexDirection:"column",gap:6}}>
-            <span style={{fontSize:10,color:C.ink3,fontFamily:"DM Sans",textTransform:"uppercase",letterSpacing:".08em"}}>Année</span>
-            <select value={yearToShow} onChange={e=>setSelYear(+e.target.value)} style={{
-              padding:"10px 16px", borderRadius:10, border:`2px solid ${C.border}`,
-              background:C.bg, color:C.ink, fontFamily:"DM Sans", fontSize:15, fontWeight:700,
-              cursor:"pointer", outline:"none",
-            }}>
-              {rm.annees.map(y => <option key={y} value={y}>{y}</option>)}
-            </select>
-          </div>
+    <div className="page">
+      <header className="entete">
+        <div>
+          <div className="date">{dateTxt}</div>
+          <h1>Comptes</h1>
         </div>
-      )}
+        <button className="rond" onClick={onMenu} aria-label="Ouvrir le menu"><IcoMenu /></button>
+      </header>
 
-      {/* Hero header */}
-      <div className="fade-up" style={{
-        background:`linear-gradient(135deg, ${C.ink} 0%, #2d2d5e 100%)`,
-        borderRadius:24, padding:"32px 36px", marginBottom:28, color:"white",
-        position:"relative", overflow:"hidden",
-      }}>
-        {/* Decorative circles */}
-        <div style={{position:"absolute",top:-40,right:-40,width:200,height:200,borderRadius:"50%",background:"rgba(255,255,255,0.04)"}}/>
-        <div style={{position:"absolute",bottom:-60,right:80,width:140,height:140,borderRadius:"50%",background:"rgba(255,255,255,0.04)"}}/>
-        <div style={{fontFamily:"DM Sans",fontSize:12,fontWeight:500,opacity:.6,letterSpacing:".12em",textTransform:"uppercase",marginBottom:8}}>{data.today}</div>
-        <div style={{fontFamily:"Playfair Display",fontSize:34,fontWeight:900,lineHeight:1.1,marginBottom:16}}>{data.month}</div>
+      {horsLigne && <div className="hors-ligne">{horsLigne}</div>}
 
-        {/* Progress bar mois */}
-        <div style={{marginBottom:20}}>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:12,opacity:.7,fontFamily:"DM Sans",marginBottom:6}}>
-            <span>{fmtH(s.presentH)} réalisé</span>
-            <span>{pct}% du mois</span>
-            <span>{fmtH(s.futurH)} restant</span>
-          </div>
-          <div style={{height:8,background:"rgba(255,255,255,0.15)",borderRadius:4,overflow:"hidden"}}>
-            <div style={{width:`${pct}%`,height:"100%",background:"linear-gradient(90deg,#FECA57,#FF6B6B)",borderRadius:4,transition:"width 1s ease"}}/>
-          </div>
+      <section className="hero" aria-label="Patrimoine">
+        <div className="ligne-tete">
+          <span className="lib">Patrimoine total</span>
+          {mSoldes && <span className="pill">au {finDeMois(mSoldes)}</span>}
         </div>
-
-        <div style={{display:"flex",gap:32,flexWrap:"wrap"}}>
-          <div>
-            <div style={{fontFamily:"Playfair Display",fontSize:38,fontWeight:900,lineHeight:1}}>{fmtM(totalE)}</div>
-            <div style={{fontSize:12,opacity:.6,fontFamily:"DM Sans",marginTop:3}}>Total mois en cours</div>
-          </div>
-          <div style={{width:1,background:"rgba(255,255,255,0.15)",margin:"4px 0"}}/>
-          <div>
-            <div style={{fontFamily:"Playfair Display",fontSize:28,fontWeight:700,color:"#FECA57",lineHeight:1}}>{fmtM(data.nextMonth?.total||0)}</div>
-            <div style={{fontSize:12,opacity:.6,fontFamily:"DM Sans",marginTop:3}}>Mois prochain estimé</div>
-          </div>
-        </div>
-      </div>
-
-      {/* KPIs grid */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:14,marginBottom:28}}>
-        <KpiCard label="Heures réalisées" value={fmtH(s.presentH)} color="#FF6B6B" delay=""/>
-        <KpiCard label="Heures restantes" value={fmtH(s.futurH)} color="#45B7D1" delay="-2"/>
-        <KpiCard label="Total heures mois" value={fmtH(s.totalH)} color="#4ECDC4" delay="-3"/>
-        <KpiCard label="Prix moyen / h" value={`${Number(s.avgRate).toFixed(2)} €`} color="#FECA57" delay="-4"/>
-        <KpiCard label="Clients actifs" value={String(s.actifs).replace(/Actifs\s*:\s*/i,"")} color="#96CEB4" delay="-4"/>
-      </div>
-
-      {/* Tableau élèves */}
-      <div className="fade-up-2" style={{background:C.white,borderRadius:20,padding:"24px 28px",boxShadow:C.shadow,marginBottom:28}}>
-        <SectionTitle accent="#45B7D1">Élèves — {data.month || "mois en cours"}</SectionTitle>
-        <div style={{overflowX:"auto"}}>
-          <table style={{width:"100%",borderCollapse:"separate",borderSpacing:"0 4px",fontFamily:"DM Sans",fontSize:13}}>
-            <thead>
-              <tr>{["","Élève","Tarif","Réalisé","€ réal.","Restant","€ rest.","Total h","Total €"].map(h=>(
-                <th key={h} style={{textAlign:"left",padding:"8px 12px",fontSize:10,fontWeight:600,color:C.ink3,textTransform:"uppercase",letterSpacing:".08em",borderBottom:`2px solid ${C.border}`}}>{h}</th>
-              ))}</tr>
-            </thead>
-            <tbody>
-              {data.students.map((st,i) => {
-                const col = sc(st.code);
-                const active = st.totalH > 0;
-                return (
-                  <tr key={i} style={{opacity: active?1:.45}}>
-                    <td style={{padding:"10px 12px"}}><div style={{width:10,height:10,borderRadius:"50%",background:col}}/></td>
-                    <td style={{padding:"10px 12px",fontWeight:600,color:C.ink}}>{st.name}</td>
-                    <td style={{padding:"10px 12px",color:C.ink3}}>{st.rate} €/h</td>
-                    <td style={{padding:"10px 12px",fontWeight:600,color:"#FF6B6B"}}>{fmtH(st.presentH)}</td>
-                    <td style={{padding:"10px 12px",color:"#FF6B6B"}}>{fmtM(st.presentE)}</td>
-                    <td style={{padding:"10px 12px",fontWeight:600,color:"#45B7D1"}}>{fmtH(st.futurH)}</td>
-                    <td style={{padding:"10px 12px",color:"#45B7D1"}}>{fmtM(st.futurE)}</td>
-                    <td style={{padding:"10px 12px",fontWeight:700,color:C.ink}}>{fmtH(st.totalH)}</td>
-                    <td style={{padding:"10px 12px"}}>
-                      {active ? (
-                        <span style={{background:col+"18",color:col,fontWeight:700,padding:"4px 10px",borderRadius:8,fontSize:12}}>{fmtM(st.totalE)}</span>
-                      ) : <span style={{color:C.ink3}}>—</span>}
-                    </td>
-                  </tr>
-                );
-              })}
-              <tr style={{borderTop:`2px solid ${C.border}`}}>
-                <td colSpan={3} style={{padding:"12px 12px",fontWeight:700,fontFamily:"DM Sans",color:C.ink}}>TOTAL</td>
-                <td style={{padding:"12px 12px",fontWeight:700,color:"#FF6B6B"}}>{fmtH(s.presentH)}</td>
-                <td style={{padding:"12px 12px",fontWeight:700,color:"#FF6B6B"}}>{fmtM(s.presentE)}</td>
-                <td style={{padding:"12px 12px",fontWeight:700,color:"#45B7D1"}}>{fmtH(s.futurH)}</td>
-                <td style={{padding:"12px 12px",fontWeight:700,color:"#45B7D1"}}>{fmtM(s.futurE)}</td>
-                <td style={{padding:"12px 12px",fontWeight:700,color:C.ink}}>{fmtH(s.totalH)}</td>
-                <td style={{padding:"12px 12px"}}>
-                  <span style={{background:"#1A1A2E",color:"white",fontWeight:700,padding:"5px 12px",borderRadius:8,fontSize:13}}>{fmtM(totalE)}</span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* Mois -1 / +1 */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
-        {[
-          {data:data.prevMonth, accent:"#FF6B6B", icon:"◀", label:"Mois précédent"},
-          {data:data.nextMonth, accent:"#4ECDC4", icon:"▶", label:"Mois prochain"},
-        ].map(({data:m,accent,icon,label},i)=>(
-          <div key={i} className={`card fade-up-${i+3}`} style={{background:C.white,borderRadius:20,padding:"22px 24px",boxShadow:C.shadow,transition:"all .25s ease"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
-              <div>
-                <div style={{fontSize:10,fontFamily:"DM Sans",fontWeight:600,color:C.ink3,textTransform:"uppercase",letterSpacing:".1em",marginBottom:3}}>{label}</div>
-                <div style={{fontFamily:"Playfair Display",fontSize:16,fontWeight:700,color:C.ink}}>{m.label}</div>
-              </div>
-              <div style={{fontFamily:"Playfair Display",fontSize:22,fontWeight:900,color:accent}}>{fmtM(m.total)}</div>
-            </div>
-            <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-              {m.items.map((it,j)=>(
-                <div key={j} style={{display:"flex",justifyContent:"space-between",alignItems:"center",width:"100%",padding:"7px 12px",background:accent+"10",borderRadius:8,fontSize:12,fontFamily:"DM Sans"}}>
-                  <span style={{color:C.ink,fontWeight:500}}>{it.name}</span>
-                  <span style={{color:accent,fontWeight:700}}>{fmtH(it.h)} · {fmtM(it.e)}</span>
+        {mSoldes ? (
+          <>
+            <div className="total">{eur(total(mSoldes))}</div>
+            {mPrec && <div className="varia">{eurSigne(total(mSoldes) - total(mPrec))} depuis fin {moisNom(mPrec)}</div>}
+            <div className="comptes">
+              {COMPTES.map((c) => (
+                <div className="compte" key={c}>
+                  <span>{c}</span>
+                  <span>{eur((d.parMois[mSoldes].soldes || {})[c] || 0)}</span>
                 </div>
               ))}
             </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ── PAGE COURS ────────────────────────────────────────────────────────────────
-function PageCours({ data }) {
-  const [tab, setTab] = useState("cur");
-  const MOIS_TABS = ["Janvier","Février","Mars","Avril","Mai","Juin","Juillet","Août","Septembre","Octobre","Novembre","Décembre"];
-  const now = new Date();
-  const curM = now.getMonth(), curY = now.getFullYear();
-  const prevM = curM === 0 ? 11 : curM - 1, prevY = curM === 0 ? curY - 1 : curY;
-  const nextM = curM === 11 ? 0 : curM + 1, nextY = curM === 11 ? curY + 1 : curY;
-  const tabs = [
-    {id:"cur",  label:`${MOIS_TABS[curM]} ${curY}`},
-    {id:"prev", label:`${MOIS_TABS[prevM]} ${prevY}`},
-    {id:"next", label:`${MOIS_TABS[nextM]} ${nextY}`},
-  ];
-  const courses = (data.courses && data.courses[tab]) || [];
-
-  // Group by student
-  const byCode = courses.reduce((a,e)=>{ if(!a[e.code]) a[e.code]=[]; a[e.code].push(e); return a; },{});
-
-  return (
-    <div style={{padding:"32px 28px",maxWidth:980,margin:"0 auto"}}>
-      <div className="fade-up" style={{marginBottom:28}}>
-        <SectionTitle accent="#4ECDC4">Calendrier des cours</SectionTitle>
-        <div style={{display:"flex",gap:8}}>
-          {tabs.map(t=>(
-            <button key={t.id} onClick={()=>setTab(t.id)} style={{
-              padding:"9px 20px",borderRadius:20,border:`2px solid ${tab===t.id?C.ink:C.border}`,
-              background:tab===t.id?C.ink:C.white,color:tab===t.id?"white":C.ink2,
-              fontFamily:"DM Sans",fontSize:13,fontWeight:600,cursor:"pointer",transition:"all .2s",
-            }}>{t.label}</button>
-          ))}
-        </div>
-      </div>
-
-      <div style={{display:"flex",flexDirection:"column",gap:16}}>
-        {Object.entries(byCode).map(([code,evs],i)=>{
-          const col = sc(code);
-          const name = evs[0].name;
-          const doneCount = evs.filter(e=>e.done).length;
-          return (
-            <div key={code} className={`card fade-up-${Math.min(i+1,4)}`} style={{
-              background:C.white,borderRadius:20,padding:"22px 26px",
-              boxShadow:C.shadow,transition:"all .25s ease",
-              borderLeft:`5px solid ${col}`,
-            }}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16,flexWrap:"wrap",gap:8}}>
-                <div style={{display:"flex",alignItems:"center",gap:12}}>
-                  <div style={{width:44,height:44,borderRadius:12,background:col+"20",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,fontWeight:900,color:col,fontFamily:"Playfair Display"}}>{code}</div>
-                  <div>
-                    <div style={{fontFamily:"Playfair Display",fontSize:18,fontWeight:700,color:C.ink}}>{name}</div>
-                    <div style={{fontSize:11,color:C.ink3,fontFamily:"DM Sans",marginTop:2}}>{doneCount}/{evs.length} séances réalisées</div>
-                  </div>
-                </div>
-                <div style={{display:"flex",gap:6,alignItems:"center"}}>
-                  <div style={{height:8,width:80,borderRadius:4,background:col+"22",overflow:"hidden"}}>
-                    <div style={{width:`${evs.length>0?doneCount/evs.length*100:0}%`,height:"100%",background:col,borderRadius:4}}/>
-                  </div>
-                  <span style={{fontSize:12,fontWeight:700,color:col,fontFamily:"DM Sans"}}>{evs.length>0?Math.round(doneCount/evs.length*100):0}%</span>
-                </div>
-              </div>
-              <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
-                {evs.map((e,j)=>(
-                  <div key={j} style={{
-                    padding:"8px 14px",borderRadius:10,
-                    background: e.done ? col+"15" : C.bg,
-                    border: `1.5px solid ${e.done ? col+"60" : C.border}`,
-                    fontFamily:"DM Sans",fontSize:12,
-                  }}>
-                    <span style={{fontWeight:600,color:e.done?col:C.ink}}>{e.date}</span>
-                    <span style={{color:C.ink3,marginLeft:6}}>{e.time}</span>
-                    {e.done && <span style={{marginLeft:6,color:col}}>✓</span>}
-                  </div>
-                ))}
-              </div>
-            </div>
-          );
-        })}
-        {courses.length===0&&<p style={{color:C.ink3,textAlign:"center",padding:40,fontFamily:"DM Sans"}}>Aucun cours pour cette période.</p>}
-      </div>
-    </div>
-  );
-}
-
-// ── PAGE HISTORIQUE + GRAPHIQUE ───────────────────────────────────────────────
-function PageRecap({ data }) {
-  const [tooltip, setTooltip] = useState(null);
-  const [chartModal, setChartModal] = useState(false);
-  const hist = data.history;
-  const graphMissing = !data.graph || data.graph.length === 0;
-  const graphData = !graphMissing ? data.graph : hist.map(r=>({month:r.month,salaires:r.salary,loyers:0,chomage:0,total:r.salary}));
-
-  const totalS = graphData.reduce((a,r)=>a+r.total,0);
-  const withS = graphData.filter(r=>r.total>0);
-  const avgS = withS.length>0 ? totalS/withS.length : 0;
-  const best = [...graphData].sort((a,b)=>b.total-a.total)[0];
-  const last2 = graphData.slice(-2);
-  const trend = last2.length===2&&last2[0].total>0 ? ((last2[1].total-last2[0].total)/last2[0].total*100) : null;
-
-  const maxS = Math.max(...graphData.map(r=>r.total), 100);
-
-  // SVG stacked bar chart
-  const W=820, H=220, PL=48, PR=16, PT=16, PB=36;
-  const iW=W-PL-PR, iH=H-PT-PB;
-  const n=graphData.length, bW=iW/Math.max(n,1);
-  function yp(v){ return iH*(1-v/Math.max(maxS,1)); }
-  function yp2(v){ return (H*2-PT-PB)*(1-v/Math.max(maxS,1)); }
-
-  // Couleurs des 3 composantes empilées
-  const SERIES = [
-    { key:'salaires', label:'Salaires',      color:'#45B7D1' },
-    { key:'loyers',   label:'Loyers France',  color:'#FECA57' },
-    { key:'chomage',  label:'Chômage',        color:'#96CEB4' },
-  ];
-
-  return (
-    <div style={{padding:"32px 28px",maxWidth:980,margin:"0 auto"}}>
-
-      {/* Diagnostic : feuille Graph2 absente de l'API */}
-      {graphMissing && (
-        <div style={{background:"#FFF8E1",border:"1px solid #FFD54F",borderRadius:12,padding:"12px 18px",marginBottom:20,fontSize:12,fontFamily:"DM Sans",color:"#8D6E00"}}>
-          ⚠️ La feuille "Graph2" n'est pas reçue depuis Google Sheets. Vérifie que le script Apps Script a bien été <strong>redéployé en nouvelle version</strong> après modification. Données de secours affichées (Récap).
-        </div>
-      )}
-
-      {/* KPIs */}
-      <div className="fade-up" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:14,marginBottom:28}}>
-        <KpiCard label="Total période" value={fmtM(totalS)} color="#FF6B6B"/>
-        <KpiCard label="Moyenne / mois" value={fmtM(avgS)} color="#4ECDC4" delay="-2"/>
-        <KpiCard label={`Record ${best?.month||""}`} value={fmtM(best?.total||0)} color="#FECA57" delay="-3"/>
-        {trend!==null&&<KpiCard label="Tendance récente" value={`${trend>=0?"+":""}${trend.toFixed(1)}%`} color={trend>=0?"#96CEB4":"#FF6B6B"} delay="-4"/>}
-      </div>
-
-      {/* Modal graphique plein écran */}
-      {chartModal&&(
-        <div onClick={()=>setChartModal(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
-          <div onClick={e=>e.stopPropagation()} style={{background:C.white,borderRadius:24,padding:"28px 24px",width:"100%",maxWidth:1100,maxHeight:"90vh",overflow:"auto",boxShadow:"0 24px 80px rgba(0,0,0,0.3)"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
-              <SectionTitle accent="#FECA57">Évolution des revenus</SectionTitle>
-              <button onClick={()=>setChartModal(false)} style={{border:"none",background:C.bg,borderRadius:8,width:36,height:36,fontSize:18,cursor:"pointer",color:C.ink2,display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
-            </div>
-            <svg viewBox={`0 0 ${W} ${H*2}`} style={{width:"100%",fontFamily:"DM Sans"}}>
-              {[0,.25,.5,.75,1].map((f,i)=>{const v=maxS*f,y=PT+yp2(v);return <g key={i}><line x1={PL} x2={PL+iW} y1={y} y2={y} stroke="#f0f0f8" strokeWidth={1}/><text x={PL-6} y={y+4} textAnchor="end" fontSize={11} fill={C.ink3}>{Math.round(v)}€</text></g>;})}
-              {graphData.map((r,i)=>{
-                const x=PL+i*bW+bW*.1,bw=bW*.8;
-                const isLast=i===graphData.length-1;
-                const fullH = H*2-PT-PB;
-                let cumul=0;
-                return <g key={i}>
-                  {SERIES.map((s,si)=>{
-                    const val=r[s.key]||0;
-                    if(val<=0) return null;
-                    const bh=Math.max((val/Math.max(maxS,1))*fullH,0);
-                    const by=PT+fullH-cumul-bh;
-                    cumul+=bh;
-                    return <rect key={si} x={x} y={by} width={bw} height={bh} fill={s.color} opacity={isLast?1:.8} rx={si===0?5:0}/>;
-                  })}
-                  <text x={PL+i*bW+bW/2} y={PT+fullH+22} textAnchor="middle" fontSize={10} fill={isLast?C.ink:C.ink3} fontWeight={isLast?700:400}>{r.month}</text>
-                  {r.total>0&&<text x={PL+i*bW+bW/2} y={PT+fullH-cumul-7} textAnchor="middle" fontSize={isLast?12:10} fill={isLast?C.ink:C.ink2} fontWeight={700}>{Math.round(r.total)}€</text>}
-                </g>;
-              })}
-              <line x1={PL} x2={PL} y1={PT} y2={PT+(H*2-PT-PB)} stroke={C.border} strokeWidth={1}/>
-              <line x1={PL} x2={PL+iW} y1={PT+(H*2-PT-PB)} y2={PT+(H*2-PT-PB)} stroke={C.border} strokeWidth={1}/>
-            </svg>
-          </div>
-        </div>
-      )}
-
-      {/* Graphique */}
-      <div className="fade-up-2" style={{background:C.white,borderRadius:20,padding:"24px 28px",boxShadow:C.shadow,marginBottom:28}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
-          <SectionTitle accent="#FECA57">Évolution des revenus</SectionTitle>
-          <button onClick={()=>setChartModal(true)} title="Agrandir" style={{border:`1px solid ${C.border}`,background:C.bg,borderRadius:8,padding:"5px 10px",fontSize:12,cursor:"pointer",color:C.ink2,display:"flex",alignItems:"center",gap:5,fontFamily:"DM Sans"}}>
-            ⛶ Agrandir
-          </button>
-        </div>
-        <div style={{overflowX:"auto"}}>
-          <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",fontFamily:"DM Sans"}}>
-            {/* Grid */}
-            {[0,.25,.5,.75,1].map((f,i)=>{
-              const v=maxS*f, y=PT+yp(v);
-              return <g key={i}>
-                <line x1={PL} x2={PL+iW} y1={y} y2={y} stroke="#f0f0f8" strokeWidth={1}/>
-                <text x={PL-6} y={y+4} textAnchor="end" fontSize={9} fill={C.ink3}>{Math.round(v)}€</text>
-              </g>;
-            })}
-            {/* Stacked bars */}
-            {graphData.map((r,i)=>{
-              const x=PL+i*bW+bW*.15, bw=bW*.7;
-              const isLast=i===graphData.length-1;
-              let cumul=0;
-              return <g key={i}
-                onMouseEnter={()=>setTooltip({r,cx:PL+i*bW+bW/2})}
-                onMouseLeave={()=>setTooltip(null)}
-                style={{cursor:r.total>0?"pointer":"default"}}>
-                {SERIES.map((s,si)=>{
-                  const val=r[s.key]||0;
-                  if(val<=0) return null;
-                  const bh=Math.max((val/Math.max(maxS,1))*iH,0);
-                  const by=PT+iH-cumul-bh;
-                  cumul+=bh;
-                  return <rect key={si} x={x} y={by} width={bw} height={bh} fill={s.color} opacity={isLast?1:.75} rx={si===0?4:0}/>;
-                })}
-                <text x={PL+i*bW+bW/2} y={PT+iH+20} textAnchor="middle" fontSize={8}
-                  fill={isLast?C.ink:C.ink3} fontWeight={isLast?700:400}>{r.month}</text>
-                {r.total>0&&<text x={PL+i*bW+bW/2} y={PT+iH-cumul-5} textAnchor="middle" fontSize={isLast?9:7}
-                  fill={isLast?C.ink:C.ink3} fontWeight={isLast?700:400}>{Math.round(r.total)}€</text>}
-              </g>;
-            })}
-            {/* Trend line */}
-            {(()=>{
-              const pts=graphData.map((r,i)=>r.total>0?{x:PL+i*bW+bW/2,y:PT+yp(r.total)}:null).filter(Boolean);
-              return pts.length>1&&<polyline points={pts.map(p=>`${p.x},${p.y}`).join(" ")} fill="none" stroke={C.ink} strokeWidth={1.5} strokeDasharray="4,3" opacity={.25}/>;
-            })()}
-            {/* Tooltip */}
-            {tooltip&&tooltip.r.total>0&&(()=>{
-              const tx=Math.min(tooltip.cx+8,W-PR-170),ty=Math.max(PT+yp(tooltip.r.total)-12,PT);
-              const lines = SERIES.filter(s=>(tooltip.r[s.key]||0)>0);
-              const h = 24 + lines.length*14 + 6;
-              return <g>
-                <rect x={tx-6} y={ty-14} width={170} height={h} fill="white" stroke={C.border} rx={8}
-                  style={{filter:"drop-shadow(0 4px 12px rgba(0,0,0,0.1))"}}/>
-                <text x={tx+5} y={ty} fontSize={10} fill={C.ink} fontWeight={700}>{tooltip.r.month} — {fmtM(tooltip.r.total)}</text>
-                {lines.map((s,i)=>(
-                  <text key={i} x={tx+5} y={ty+18+i*14} fontSize={9} fill={s.color} fontWeight={600}>{s.label} : {fmtM(tooltip.r[s.key])}</text>
-                ))}
-              </g>;
-            })()}
-          </svg>
-        </div>
-        {/* Légende */}
-        <div style={{display:"flex",gap:16,flexWrap:"wrap",marginTop:12,paddingLeft:4}}>
-          {SERIES.map((s,i)=>(
-            <div key={i} style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:C.ink2,fontFamily:"DM Sans"}}>
-              <div style={{width:10,height:10,borderRadius:3,background:s.color}}/>
-              {s.label}
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Tableau */}
-      <div className="fade-up-3" style={{background:C.white,borderRadius:20,padding:"24px 28px",boxShadow:C.shadow}}>
-        <SectionTitle accent="#96CEB4">Historique mensuel</SectionTitle>
-        <table style={{width:"100%",borderCollapse:"separate",borderSpacing:"0 3px",fontFamily:"DM Sans",fontSize:12}}>
-          <thead>
-            <tr>{["Mois","Salaires","Loyers France","Chômage","Total","Tendance"].map(h=>(
-              <th key={h} style={{textAlign:"left",padding:"8px 14px",fontSize:10,fontWeight:600,color:C.ink3,textTransform:"uppercase",letterSpacing:".08em",borderBottom:`2px solid ${C.border}`}}>{h}</th>
-            ))}</tr>
-          </thead>
-          <tbody>
-            {[...graphData].reverse().map((r,i)=>{
-              const prev=graphData[graphData.length-2-i];
-              const delta=prev&&prev.total>0?((r.total-prev.total)/prev.total*100):null;
-              const isLast=i===0;
-              // Couleurs assombries pour la ligne du mois en cours (meilleure lisibilité sur fond gris)
-              const cSal = isLast ? "#1F7A99" : SERIES[0].color;  // bleu foncé
-              const cLoy = isLast ? "#B8860B" : SERIES[1].color;  // jaune foncé (dark goldenrod)
-              const cCho = isLast ? "#2E8B57" : SERIES[2].color;  // vert foncé (sea green)
-              const cTrend = delta===null ? C.ink3 : delta>=0 ? (isLast?"#2E8B57":"#96CEB4") : "#FF6B6B";
-              return (
-                <tr key={i} style={{background:isLast?"#C8D4E0":C.white}}>
-                  <td style={{padding:"10px 14px",fontWeight:isLast?700:400,color:isLast?C.ink:C.ink2}}>{r.month}</td>
-                  <td style={{padding:"10px 14px",color:cSal,fontWeight:isLast?700:500}}>{r.salaires>0?fmtM(r.salaires):"—"}</td>
-                  <td style={{padding:"10px 14px",color:cLoy,fontWeight:isLast?700:500}}>{r.loyers>0?fmtM(r.loyers):"—"}</td>
-                  <td style={{padding:"10px 14px",color:cCho,fontWeight:isLast?700:500}}>{r.chomage>0?fmtM(r.chomage):"—"}</td>
-                  <td style={{padding:"10px 14px"}}>
-                    <span style={{
-                      background: r.total>0?(isLast?"#FF6B6B28":"#FF6B6B18"):"transparent",
-                      color: r.total>0?"#E04848":C.ink3,
-                      padding: r.total>0?"4px 10px":"0",
-                      borderRadius:6, fontWeight:r.total>0?700:400,
-                    }}>{r.total>0?fmtM(r.total):"—"}</span>
-                  </td>
-                  <td style={{padding:"10px 14px",fontSize:11,color:cTrend,fontWeight:isLast?700:500}}>
-                    {delta===null?"—":`${delta>=0?"▲":"▼"} ${Math.abs(delta).toFixed(1)}%`}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-// ── PAGE ANALYSE — vue analytique des revenus ────────────────────────────────
-function PageAnalyse({ data }) {
-  const graphData = (data.graph && data.graph.length > 0) ? data.graph : [];
-
-  // Extraire l'année depuis le label "mois année" (ex: "jan. 2025")
-  function yearOf(label) {
-    const m = String(label).match(/(\d{4})/);
-    return m ? +m[1] : null;
-  }
-
-  // Regrouper par année
-  const parAnnee = {};
-  graphData.forEach(r => {
-    const y = yearOf(r.month);
-    if (!y) return;
-    if (!parAnnee[y]) parAnnee[y] = { salaires:0, loyers:0, chomage:0, total:0, mois:0 };
-    parAnnee[y].salaires += r.salaires;
-    parAnnee[y].loyers   += r.loyers;
-    parAnnee[y].chomage  += r.chomage;
-    parAnnee[y].total    += r.total;
-    parAnnee[y].mois     += 1;
-  });
-  const annees = Object.keys(parAnnee).map(Number).sort((a,b)=>a-b);
-
-  // Année sélectionnée pour la répartition (par défaut la plus récente)
-  const [selY, setSelY] = useState(null);
-  const anneeRep = selY || (annees.length ? annees[annees.length-1] : null);
-  const repartition = anneeRep ? parAnnee[anneeRep] : null;
-
-  // Totaux globaux par source (toute la période)
-  const totSalaires = graphData.reduce((a,r)=>a+r.salaires,0);
-  const totLoyers   = graphData.reduce((a,r)=>a+r.loyers,0);
-  const totChomage  = graphData.reduce((a,r)=>a+r.chomage,0);
-  const totGlobal   = totSalaires + totLoyers + totChomage;
-
-  const SOURCES = [
-    { key:'salaires', label:'Salaires',     color:'#45B7D1' },
-    { key:'loyers',   label:'Loyers France', color:'#FF6B6B' },
-    { key:'chomage',  label:'Chômage',       color:'#FECA57' },
-  ];
-
-  // Moyenne mensuelle glissante (3 derniers mois vs 3 précédents)
-  const last3 = graphData.slice(-3);
-  const prev3 = graphData.slice(-6, -3);
-  const avgLast3 = last3.length ? last3.reduce((a,r)=>a+r.total,0)/last3.length : 0;
-  const avgPrev3 = prev3.length ? prev3.reduce((a,r)=>a+r.total,0)/prev3.length : 0;
-  const momentum = avgPrev3 > 0 ? ((avgLast3-avgPrev3)/avgPrev3*100) : null;
-
-  // Donut SVG pour la répartition
-  function Donut({ parts, size=160 }) {
-    const tot = parts.reduce((a,p)=>a+p.value,0);
-    if (tot <= 0) return <div style={{color:C.ink3,fontSize:12}}>Aucune donnée</div>;
-    const R=size/2, r=R*0.62, cx=R, cy=R;
-    let angle=-Math.PI/2;
-    const arcs = parts.map(p => {
-      const frac = p.value/tot;
-      const a0=angle, a1=angle+frac*2*Math.PI;
-      angle=a1;
-      const large = frac>0.5?1:0;
-      const x0=cx+R*Math.cos(a0), y0=cy+R*Math.sin(a0);
-      const x1=cx+R*Math.cos(a1), y1=cy+R*Math.sin(a1);
-      const xi1=cx+r*Math.cos(a1), yi1=cy+r*Math.sin(a1);
-      const xi0=cx+r*Math.cos(a0), yi0=cy+r*Math.sin(a0);
-      return { d:`M${x0},${y0} A${R},${R} 0 ${large} 1 ${x1},${y1} L${xi1},${yi1} A${r},${r} 0 ${large} 0 ${xi0},${yi0} Z`, color:p.color, frac };
-    });
-    return (
-      <svg viewBox={`0 0 ${size} ${size}`} style={{width:size,height:size}}>
-        {arcs.map((a,i)=><path key={i} d={a.d} fill={a.color}/>)}
-        <circle cx={cx} cy={cy} r={r-1} fill={C.white}/>
-        <text x={cx} y={cy-6} textAnchor="middle" fontSize={11} fill={C.ink3} fontFamily="DM Sans">Total</text>
-        <text x={cx} y={cy+12} textAnchor="middle" fontSize={14} fontWeight="700" fill={C.ink} fontFamily="Playfair Display">{Math.round(tot)}€</text>
-      </svg>
-    );
-  }
-
-  // Mini graphe en ligne — total mensuel sur toute la période
-  function LineChart() {
-    const W=820,H=180,P={t:16,r:16,b:30,l:46};
-    const iW=W-P.l-P.r, iH=H-P.t-P.b;
-    const n=graphData.length;
-    const maxV=Math.max(...graphData.map(r=>r.total),100);
-    const pts=graphData.map((r,i)=>({
-      x:P.l+(n<=1?iW/2:i*iW/(n-1)),
-      y:P.t+iH*(1-r.total/maxV),
-      r,
-    }));
-    const path=pts.map((p,i)=>`${i===0?'M':'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
-    const area=`${path} L${pts[pts.length-1].x.toFixed(1)},${P.t+iH} L${pts[0].x.toFixed(1)},${P.t+iH} Z`;
-    return (
-      <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",fontFamily:"DM Sans"}}>
-        <defs>
-          <linearGradient id="lineFill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#45B7D1" stopOpacity="0.25"/>
-            <stop offset="100%" stopColor="#45B7D1" stopOpacity="0"/>
-          </linearGradient>
-        </defs>
-        {[0,.25,.5,.75,1].map((f,i)=>{const v=maxV*f,y=P.t+iH*(1-f);return <g key={i}>
-          <line x1={P.l} x2={P.l+iW} y1={y} y2={y} stroke="#f0f0f8" strokeWidth={1}/>
-          <text x={P.l-6} y={y+4} textAnchor="end" fontSize={9} fill={C.ink3}>{Math.round(v)}€</text>
-        </g>;})}
-        <path d={area} fill="url(#lineFill)"/>
-        <path d={path} fill="none" stroke="#45B7D1" strokeWidth={2.5} strokeLinejoin="round"/>
-        {pts.map((p,i)=>(
-          <g key={i}>
-            <circle cx={p.x} cy={p.y} r={i===pts.length-1?5:3} fill={i===pts.length-1?"#FF6B6B":"#45B7D1"}/>
-            {(i===0||i===pts.length-1||i%3===0)&&<text x={p.x} y={P.t+iH+16} textAnchor="middle" fontSize={7} fill={C.ink3}>{p.r.month}</text>}
-          </g>
-        ))}
-      </svg>
-    );
-  }
-
-  if (graphData.length === 0) {
-    return <div style={{padding:"40px 28px",maxWidth:980,margin:"0 auto",textAlign:"center",color:C.ink3,fontFamily:"DM Sans"}}>
-      Aucune donnée d'analyse disponible.
-    </div>;
-  }
-
-  return (
-    <div style={{padding:"32px 28px",maxWidth:980,margin:"0 auto"}}>
-
-      {/* Synthèse momentum */}
-      <div className="fade-up" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:14,marginBottom:24}}>
-        <KpiCard label="Moyenne 3 derniers mois" value={fmtM(avgLast3)} color="#45B7D1"/>
-        {momentum!==null && <KpiCard label="vs 3 mois précédents" value={`${momentum>=0?"+":""}${momentum.toFixed(1)}%`} color={momentum>=0?"#96CEB4":"#FF6B6B"} delay="-2"/>}
-        <KpiCard label="Cumul Salaires" value={fmtM(totSalaires)} color="#45B7D1" delay="-3"/>
-        <KpiCard label="Cumul Loyers" value={fmtM(totLoyers)} color="#FF6B6B" delay="-4"/>
-        <KpiCard label="Cumul Chômage" value={fmtM(totChomage)} color="#FECA57" delay="-4"/>
-      </div>
-
-      {/* Courbe d'évolution */}
-      <div className="fade-up-2" style={{background:C.white,borderRadius:20,padding:"24px 28px",boxShadow:C.shadow,marginBottom:24}}>
-        <SectionTitle accent="#45B7D1">Évolution du revenu total</SectionTitle>
-        <div style={{overflowX:"auto"}}><LineChart/></div>
-      </div>
-
-      {/* Comparaison annuelle */}
-      <div className="fade-up-2" style={{background:C.white,borderRadius:20,padding:"24px 28px",boxShadow:C.shadow,marginBottom:24}}>
-        <SectionTitle accent="#96CEB4">Comparaison par année</SectionTitle>
-        <table style={{width:"100%",borderCollapse:"separate",borderSpacing:"0 4px",fontFamily:"DM Sans",fontSize:12}}>
-          <thead>
-            <tr>{["Année","Salaires","Loyers","Chômage","Total","Moy./mois"].map(h=>(
-              <th key={h} style={{textAlign:"left",padding:"8px 12px",fontSize:10,fontWeight:600,color:C.ink3,textTransform:"uppercase",letterSpacing:".08em",borderBottom:`2px solid ${C.border}`}}>{h}</th>
-            ))}</tr>
-          </thead>
-          <tbody>
-            {annees.map((y,i)=>{
-              const a=parAnnee[y];
-              const moy = a.mois>0 ? a.total/a.mois : 0;
-              return (
-                <tr key={i} style={{background:i%2===0?"#F4F7FA":C.white}}>
-                  <td style={{padding:"10px 12px",fontWeight:700,color:C.ink}}>{y}</td>
-                  <td style={{padding:"10px 12px",color:"#45B7D1",fontWeight:500}}>{fmtM(a.salaires)}</td>
-                  <td style={{padding:"10px 12px",color:"#FF6B6B",fontWeight:500}}>{fmtM(a.loyers)}</td>
-                  <td style={{padding:"10px 12px",color:"#D4A015",fontWeight:500}}>{fmtM(a.chomage)}</td>
-                  <td style={{padding:"10px 12px"}}><span style={{background:"#96CEB422",color:"#5BA86F",fontWeight:700,padding:"4px 10px",borderRadius:6}}>{fmtM(a.total)}</span></td>
-                  <td style={{padding:"10px 12px",color:C.ink2,fontWeight:600}}>{fmtM(moy)}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Répartition par source (donut) */}
-      <div className="fade-up-3" style={{background:C.white,borderRadius:20,padding:"24px 28px",boxShadow:C.shadow}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16,flexWrap:"wrap",gap:10}}>
-          <SectionTitle accent="#FECA57">Répartition des revenus</SectionTitle>
-          <select value={anneeRep||''} onChange={e=>setSelY(+e.target.value)} style={{
-            padding:"8px 14px",borderRadius:10,border:`2px solid ${C.border}`,background:C.bg,
-            color:C.ink,fontFamily:"DM Sans",fontSize:14,fontWeight:700,cursor:"pointer",outline:"none",
-          }}>
-            {annees.map(y=><option key={y} value={y}>{y}</option>)}
-          </select>
-        </div>
-        {repartition && (
-          <div style={{display:"flex",gap:32,alignItems:"center",flexWrap:"wrap",justifyContent:"center"}}>
-            <Donut parts={SOURCES.map(s=>({value:repartition[s.key],color:s.color}))}/>
-            <div style={{flex:1,minWidth:200}}>
-              {SOURCES.map((s,i)=>{
-                const val=repartition[s.key];
-                const pct=repartition.total>0?(val/repartition.total*100):0;
-                return (
-                  <div key={i} style={{marginBottom:14}}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                      <span style={{display:"flex",alignItems:"center",gap:8,fontSize:13,color:C.ink,fontWeight:500}}>
-                        <span style={{width:12,height:12,borderRadius:3,background:s.color}}/>{s.label}
-                      </span>
-                      <span style={{fontSize:13,fontWeight:700,color:C.ink}}>{fmtM(val)}</span>
-                    </div>
-                    <div style={{height:8,background:"#f0f0f5",borderRadius:4,overflow:"hidden"}}>
-                      <div style={{width:`${pct}%`,height:"100%",background:s.color,borderRadius:4}}/>
-                    </div>
-                    <div style={{fontSize:10,color:C.ink3,marginTop:2,textAlign:"right"}}>{pct.toFixed(1)}%</div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
+          </>
+        ) : (
+          <div className="vide">Aucun solde saisi pour l'instant. Renseigne tes comptes dans l'onglet Mois pour suivre ton patrimoine.</div>
         )}
-      </div>
+      </section>
+
+      {!courantSaisi && (
+        <section className="carte" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div className="ligne-tete">
+            <h2>{moisTitre(courant)}</h2>
+            <span className="chip-etat attente">Pas encore saisi</span>
+          </div>
+          <div className="petit">
+            {dernierAvant(d, courant)
+              ? 'Les montants de ' + moisNom(dernierAvant(d, courant)) + ' seront repris : il te suffira de corriger ce qui change.'
+              : 'Saisis tes revenus, tes dépenses et le solde de tes comptes.'}
+          </div>
+          <button className="bouton" onClick={() => onGoMois(courant)}>Saisir {moisNom(courant)}</button>
+        </section>
+      )}
+
+      {dernierArch && (
+        <CarteMois d={d} m={dernierArch} onVoir={onGoHist} onModifier={() => onGoMois(dernierArch)} />
+      )}
+
+      {dernierArch && <Sparkline d={d} fin={dernierArch} />}
     </div>
   );
 }
 
-// ── PAGE LIENS — raccourcis vers les feuilles Google Sheets ──────────────────
-function PageLiens() {
-  const liens = [
-    {
-      titre: "Nóminas",
-      desc: "Feuille de suivi des salaires, cours et revenus",
-      url: "https://docs.google.com/spreadsheets/d/1qFAGMnfFkznxkckuF5eGgY0XSo9qWAGao1vi_e5rkfw/edit",
-      color: "#45B7D1",
-      icon: "📊",
-    },
-    {
-      titre: "Impôts",
-      desc: "Feuille de gestion fiscale",
-      url: "https://docs.google.com/spreadsheets/d/1jThZTb0tiJE__FGkaNk9M_Qflk4QBk3tpwCq7f7z5gg/edit",
-      color: "#FF6B6B",
-      icon: "🧾",
-    },
-  ];
+/* ---------- Mois ---------- */
 
-  return (
-    <div style={{padding:"32px 28px",maxWidth:980,margin:"0 auto"}}>
-      <div className="fade-up" style={{marginBottom:24}}>
-        <SectionTitle accent="#96CEB4">Mes documents</SectionTitle>
-      </div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:16}}>
-        {liens.map((l,i)=>(
-          <a key={i} href={l.url} target="_blank" rel="noopener noreferrer"
-            className={`card fade-up${i>0?"-2":""}`}
-            style={{
-              display:"block", textDecoration:"none",
-              background:C.white, borderRadius:20, padding:"26px 28px",
-              boxShadow:C.shadow, transition:"all .25s ease",
-              borderLeft:`5px solid ${l.color}`,
-            }}>
-            <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:12}}>
-              <div style={{
-                width:52,height:52,borderRadius:14,flexShrink:0,
-                background:l.color+"18",display:"flex",alignItems:"center",
-                justifyContent:"center",fontSize:26,
-              }}>{l.icon}</div>
-              <div>
-                <div style={{fontFamily:"Playfair Display",fontSize:20,fontWeight:700,color:C.ink,lineHeight:1.1}}>{l.titre}</div>
-                <div style={{fontSize:12,color:C.ink3,fontFamily:"DM Sans",marginTop:3}}>{l.desc}</div>
-              </div>
-            </div>
-            <div style={{
-              display:"inline-flex",alignItems:"center",gap:6,
-              color:l.color,fontFamily:"DM Sans",fontSize:13,fontWeight:600,
-              marginTop:4,
-            }}>
-              Ouvrir la feuille
-              <span style={{fontSize:16,lineHeight:1}}>→</span>
-            </div>
-          </a>
-        ))}
-      </div>
-    </div>
-  );
-}
+function PageMois({ d, mois, changerMois, dirty, setDirty, recharger, notifier }) {
+  const actives = d.cats.filter((c) => c.actif);
+  const revenus = actives.filter((c) => c.type === 'revenu');
+  const depenses = actives.filter((c) => c.type === 'depense');
+  const [vals, setVals] = useState({});
+  const [sold, setSold] = useState({});
+  const [reconduit, setReconduit] = useState(null);
+  const [edit, setEdit] = useState(null);
+  const [ajout, setAjout] = useState(null);
+  const [ponct, setPonct] = useState([]);
+  const [editPonct, setEditPonct] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const etat = useRef({ mois: null, dirty: false });
+  etat.current.dirty = dirty;
 
-// ── ÉDITEUR D'UN MOIS (partagé Situation / Archives) ─────────────────────────
-function EditeurMois({ data, mois, onSaved, compact }) {
-  const cats = (data.finCategories || []).filter(c => c.actif);
-  const revenus  = cats.filter(c => c.type === 'revenu');
-  const depenses = cats.filter(c => c.type === 'depense');
+  const aDesDonnees = !!d.parMois[mois];
+  const source = dernierAvant(d, mois);
 
-  const [vals, setVals]       = useState({});
-  const [sold, setSold]       = useState({});
-  const [saving, setSaving]   = useState(false);
-  const [msg, setMsg]         = useState(null);
-  const [nouvelle, setNouvelle] = useState('');
-  const [typeNouv, setTypeNouv] = useState('depense');
-
-  // Charger les valeurs du mois sélectionné
-  useEffect(() => {
+  function valeursDe(m) {
     const v = {};
-    cats.forEach(c => { v[c.nom] = ''; });
-    (data.finArchives || []).filter(a => a.mois === mois)
-      .forEach(a => { v[a.categorie] = a.montant; });
-    setVals(v);
-
+    actives.forEach((c) => { v[c.nom] = ''; });
+    d.arch.filter((a) => a.mois === m).forEach((a) => { if (a.categorie in v) v[a.categorie] = a.montant; });
     const s = {};
-    FIN_COMPTES.forEach(c => { s[c] = ''; });
-    (data.finSoldes || []).filter(x => x.mois === mois)
-      .forEach(x => { s[x.compte] = x.montant; });
-    setSold(s);
-    setMsg(null);
-  }, [mois, data]);
+    COMPTES.forEach((c) => { s[c] = ''; });
+    d.sold.filter((x) => x.mois === m).forEach((x) => { if (x.compte in s) s[x.compte] = x.montant; });
+    return { v, s };
+  }
 
-  const totRev = revenus.reduce((a,c)=>a + num(vals[c.nom]), 0);
-  const totDep = depenses.reduce((a,c)=>a + num(vals[c.nom]), 0);
-  const solde  = totRev - totDep;
-  const patrimoine = FIN_COMPTES.reduce((a,c)=>a + num(sold[c]), 0);
-
-  async function sauvegarder() {
-    setSaving(true); setMsg(null);
-    try {
-      await apiPost('saveArchives', {
-        mois: mois,
-        lignes: Object.keys(vals).map(k => ({ categorie: k, montant: num(vals[k]) }))
+  useEffect(() => {
+    const memeMois = etat.current.mois === mois;
+    etat.current.mois = mois;
+    if (memeMois && etat.current.dirty) {
+      // Données rafraîchies pendant une saisie : on garde la saisie, on ajoute les nouvelles lignes
+      setVals((old) => {
+        const n = {};
+        actives.forEach((c) => { n[c.nom] = c.nom in old ? old[c.nom] : ''; });
+        return n;
       });
+      return;
+    }
+    // Les dépenses ponctuelles ne sont jamais reconduites
+    setPonct(d.arch.filter((x) => x.mois === mois && estPonctuel(x.categorie))
+      .map((x, i) => ({ id: 'p' + i, nom: x.categorie.slice(PREFIXE_PONCT.length), montant: x.montant })));
+    if (aDesDonnees || !source) {
+      const r = valeursDe(mois);
+      setVals(r.v); setSold(r.s); setReconduit(null);
+    } else {
+      const r = valeursDe(source);
+      setVals(r.v); setSold(r.s); setReconduit(source);
+    }
+  }, [mois, d]);
+
+  const totRev = revenus.reduce((a, c) => a + num(vals[c.nom]), 0);
+  const totPonct = ponct.reduce((a, p) => a + num(p.montant), 0);
+  const totDep = depenses.reduce((a, c) => a + num(vals[c.nom]), 0) + totPonct;
+  const loyersFr = revenus.filter((c) => estLoyersFrance(c.nom)).reduce((a, c) => a + num(vals[c.nom]), 0);
+  const soldesRemplis = COMPTES.some((c) => !vide(sold[c]));
+  const patrimoine = COMPTES.reduce((a, c) => a + num(sold[c]), 0);
+
+  function repartirDeZero() {
+    const v = {}; actives.forEach((c) => { v[c.nom] = ''; });
+    const s = {}; COMPTES.forEach((c) => { s[c] = ''; });
+    setVals(v); setSold(s); setPonct([]); setReconduit(null); setDirty(true);
+  }
+
+  function validerPonct(p) {
+    setPonct((l) => (l.some((x) => x.id === p.id) ? l.map((x) => (x.id === p.id ? p : x)) : l.concat([p])));
+    setDirty(true);
+    setEditPonct(null);
+  }
+  function supprimerPonct(id) {
+    setPonct((l) => l.filter((x) => x.id !== id));
+    setDirty(true);
+    setEditPonct(null);
+  }
+
+  function reference(e) {
+    if (!source) return null;
+    if (e.kind === 'compte') {
+      const x = d.sold.find((s) => s.mois === source && s.compte === e.nom);
+      return x ? x.montant : null;
+    }
+    return (d.parMois[source] && d.parMois[source].cats[e.nom]) || null;
+  }
+
+  function valider(valeur) {
+    if (edit.kind === 'compte') setSold((s) => Object.assign({}, s, { [edit.nom]: valeur }));
+    else setVals((v) => Object.assign({}, v, { [edit.nom]: valeur }));
+    setDirty(true);
+    setEdit(null);
+  }
+
+  async function enregistrer() {
+    setSaving(true);
+    try {
+      const lignes = actives.map((c) => ({ categorie: c.nom, montant: num(vals[c.nom]) }));
+      // Conserve les montants déjà enregistrés des lignes masquées ou inconnues
+      ponct.filter((p) => p.nom.trim() && num(p.montant) !== 0)
+        .forEach((p) => lignes.push({ categorie: PREFIXE_PONCT + p.nom.trim(), montant: num(p.montant) }));
+      d.arch.filter((a) => a.mois === mois && !estPonctuel(a.categorie) && !actives.some((c) => c.nom === a.categorie))
+        .forEach((a) => lignes.push({ categorie: a.categorie, montant: a.montant }));
+      await apiPost('saveArchives', { mois: mois, lignes: lignes });
       await apiPost('saveSoldes', {
         mois: mois,
-        soldes: FIN_COMPTES.map(c => ({ compte: c, montant: num(sold[c]) }))
+        soldes: COMPTES.filter((c) => !vide(sold[c])).map((c) => ({ compte: c, montant: num(sold[c]) }))
       });
-      setMsg({ ok:true, txt:'Enregistré' });
-      if (onSaved) await onSaved();
+      setDirty(false);
+      etat.current.dirty = false;
+      setReconduit(null);
+      notifier(capital(moisLong(mois)) + ' enregistré');
+      await recharger(true);
     } catch (e) {
-      setMsg({ ok:false, txt:e.message });
-    } finally { setSaving(false); }
-  }
-
-  // Retire une ligne : masquage si elle a un historique, suppression si elle est vide
-  async function supprimerCategorie(nom) {
-    const toutes = data.finCategories || [];
-    const aHistorique = (data.finArchives || []).some(a => a.categorie === nom && a.montant !== 0);
-    const question = aHistorique
-      ? 'Retirer « ' + nom + ' » du formulaire ?\n\nLes montants déjà enregistrés resteront visibles dans les Archives.'
-      : 'Supprimer définitivement « ' + nom + ' » ?';
-    if (!window.confirm(question)) return;
-
-    setSaving(true); setMsg(null);
-    try {
-      const liste = aHistorique
-        ? toutes.map(c => c.nom === nom ? Object.assign({}, c, { actif: false }) : c)
-        : toutes.filter(c => c.nom !== nom);
-      await apiPost('saveCategories', { categories: liste });
-      setMsg({ ok:true, txt: aHistorique ? 'Ligne retirée, historique conservé' : 'Ligne supprimée' });
-      if (onSaved) await onSaved();
-    } catch (e) {
-      setMsg({ ok:false, txt:e.message });
-    } finally { setSaving(false); }
-  }
-
-  // Réaffiche une ligne précédemment masquée
-  async function restaurerCategorie(nom) {
-    setSaving(true); setMsg(null);
-    try {
-      const liste = (data.finCategories || [])
-        .map(c => c.nom === nom ? Object.assign({}, c, { actif: true }) : c);
-      await apiPost('saveCategories', { categories: liste });
-      setMsg({ ok:true, txt:'Ligne restaurée' });
-      if (onSaved) await onSaved();
-    } catch (e) {
-      setMsg({ ok:false, txt:e.message });
-    } finally { setSaving(false); }
-  }
-
-  async function ajouterCategorie() {
-    const nom = nouvelle.trim();
-    if (!nom) return;
-    if (cats.some(c => c.nom.toLowerCase() === nom.toLowerCase())) {
-      setMsg({ ok:false, txt:'Cette catégorie existe déjà' }); return;
+      notifier('Échec de l\'enregistrement : ' + e.message, true);
+    } finally {
+      setSaving(false);
     }
-    setSaving(true); setMsg(null);
-    try {
-      const liste = (data.finCategories || []).concat([{ nom: nom, type: typeNouv, actif: true }]);
-      await apiPost('saveCategories', { categories: liste });
-      setNouvelle('');
-      setMsg({ ok:true, txt:'Catégorie ajoutée' });
-      if (onSaved) await onSaved();
-    } catch (e) {
-      setMsg({ ok:false, txt:e.message });
-    } finally { setSaving(false); }
   }
 
-  const colonne = (titre, liste, couleur, total) => (
-    <div style={{flex:1,minWidth:260}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
-        <span style={{fontSize:11,fontWeight:700,color:couleur,textTransform:"uppercase",letterSpacing:".1em",fontFamily:"DM Sans"}}>{titre}</span>
-        <span style={{fontFamily:"Playfair Display",fontSize:17,fontWeight:700,color:couleur}}>{fmtM(total)}</span>
-      </div>
-      {liste.length === 0
-        ? <div style={{fontSize:12,color:C.ink3,fontStyle:"italic",padding:"8px 0"}}>Aucune ligne</div>
-        : liste.map((c,i) => (
-            <div key={c.nom} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,padding:"7px 0",borderBottom:`1px solid ${C.border}`}}>
-              <span style={{fontSize:13,color:C.ink2,fontFamily:"DM Sans",flex:1,minWidth:0}}>{c.nom}</span>
-              <input
-                type="text" inputMode="decimal"
-                value={vals[c.nom] === undefined ? '' : vals[c.nom]}
-                onChange={e => setVals(Object.assign({}, vals, { [c.nom]: nettoyerSaisie(e.target.value) }))}
-                placeholder="0"
-                style={{
-                  width:110, padding:"7px 10px", textAlign:"right",
-                  border:`1.5px solid ${C.border}`, borderRadius:8,
-                  fontFamily:"DM Sans", fontSize:13, fontWeight:600,
-                  color: couleur, background:C.bg, outline:"none",
-                }}/>
-              {!compact && (
-                <button onClick={()=>supprimerCategorie(c.nom)} disabled={saving}
-                  title={'Retirer ' + c.nom}
-                  style={{
-                    border:"none", background:"transparent", cursor: saving?"default":"pointer",
-                    color:C.ink3, fontSize:16, lineHeight:1, padding:"4px 2px",
-                    fontFamily:"DM Sans", opacity: saving?.4:.65,
-                  }}>×</button>
-              )}
-            </div>
-          ))}
-    </div>
-  );
+  async function sauverCategories(liste, msg) {
+    setSaving(true);
+    try {
+      await apiPost('saveCategories', { categories: liste });
+      notifier(msg);
+      await recharger(true);
+    } catch (e) {
+      notifier('Échec : ' + e.message, true);
+    } finally {
+      setSaving(false);
+    }
+  }
 
-  return (
-    <div>
-      <div style={{display:"flex",gap:28,flexWrap:"wrap",marginBottom:20}}>
-        {colonne('Revenus',  revenus,  '#2E8B57', totRev)}
-        {colonne('Dépenses', depenses, '#E04848', totDep)}
-      </div>
+  function masquer(nom) {
+    const aHisto = d.arch.some((a) => a.categorie === nom && a.montant !== 0);
+    const q = aHisto
+      ? 'Masquer « ' + nom + ' » ?\n\nLes montants déjà enregistrés restent dans l\'historique. Tu pourras la réafficher depuis le menu.'
+      : 'Supprimer « ' + nom + ' » ? Elle n\'a encore aucun montant enregistré.';
+    if (!window.confirm(q)) return;
+    setEdit(null);
+    const liste = aHisto
+      ? d.cats.map((c) => (c.nom === nom ? Object.assign({}, c, { actif: false }) : c))
+      : d.cats.filter((c) => c.nom !== nom);
+    sauverCategories(liste, aHisto ? 'Ligne masquée' : 'Ligne supprimée');
+  }
 
-      {/* Solde du mois */}
-      <div style={{
-        background: solde>=0 ? '#EAF6EF' : '#FDECEC',
-        border:`1px solid ${solde>=0 ? '#BFE3CD' : '#F5C6C6'}`,
-        borderRadius:12, padding:"12px 18px", marginBottom:20,
-        display:"flex", justifyContent:"space-between", alignItems:"center",
-      }}>
-        <span style={{fontSize:12,fontWeight:600,color:C.ink2,textTransform:"uppercase",letterSpacing:".08em",fontFamily:"DM Sans"}}>Solde du mois</span>
-        <span style={{fontFamily:"Playfair Display",fontSize:24,fontWeight:900,color: solde>=0 ? '#2E8B57' : '#E04848'}}>{fmtM(solde)}</span>
-      </div>
+  function ajouter(nom, type) {
+    const n = nom.trim();
+    if (!n) return;
+    if (d.cats.some((c) => c.nom.toLowerCase() === n.toLowerCase())) {
+      const ex = d.cats.find((c) => c.nom.toLowerCase() === n.toLowerCase());
+      if (ex.actif) { notifier('Cette ligne existe déjà', true); return; }
+      setAjout(null);
+      sauverCategories(d.cats.map((c) => (c === ex ? Object.assign({}, c, { actif: true }) : c)), 'Ligne réaffichée');
+      return;
+    }
+    setAjout(null);
+    sauverCategories(d.cats.concat([{ nom: n, type: type, actif: true }]), 'Ligne ajoutée');
+  }
 
-      {/* Patrimoine (stocks) */}
-      {!compact && (
-        <div style={{marginBottom:20}}>
-          <div style={{fontSize:11,fontWeight:700,color:'#1F7A99',textTransform:"uppercase",letterSpacing:".1em",fontFamily:"DM Sans",marginBottom:8}}>
-            Épargne — solde en fin de mois
-          </div>
-          {FIN_COMPTES.map((c,i)=>(
-            <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,padding:"7px 0",borderBottom:`1px solid ${C.border}`}}>
-              <span style={{fontSize:13,color:C.ink2,fontFamily:"DM Sans"}}>{c}</span>
-              <input
-                type="text" inputMode="decimal"
-                value={sold[c] === undefined ? '' : sold[c]}
-                onChange={e => setSold(Object.assign({}, sold, { [c]: nettoyerSaisie(e.target.value) }))}
-                placeholder="0"
-                style={{
-                  width:120, padding:"7px 10px", textAlign:"right",
-                  border:`1.5px solid ${C.border}`, borderRadius:8,
-                  fontFamily:"DM Sans", fontSize:13, fontWeight:600,
-                  color:'#1F7A99', background:C.bg, outline:"none",
-                }}/>
-            </div>
-          ))}
-          <div style={{display:"flex",justifyContent:"space-between",marginTop:10,paddingTop:8,borderTop:`2px solid ${C.border}`}}>
-            <span style={{fontSize:12,fontWeight:600,color:C.ink2,fontFamily:"DM Sans"}}>Total patrimoine</span>
-            <span style={{fontFamily:"Playfair Display",fontSize:19,fontWeight:800,color:'#1F7A99'}}>{fmtM(patrimoine)}</span>
-          </div>
+  const aEnregistrer = dirty || !!reconduit;
+  let etatTxt = 'Aucune donnée', etatCls = '';
+  if (saving) { etatTxt = 'Enregistrement…'; }
+  else if (dirty) { etatTxt = 'Brouillon non enregistré'; etatCls = 'attente'; }
+  else if (reconduit) { etatTxt = 'Pré-rempli, non enregistré'; etatCls = 'attente'; }
+  else if (aDesDonnees) { etatTxt = 'Enregistré'; etatCls = 'ok'; }
+
+  function Rang({ key, nom, valeur, couleur, rond, onClick, premier }) {
+    return (
+      <button key={key} className="rang" onClick={onClick} style={premier ? { borderTop: 'none' } : null}>
+        <span className="pt" style={{ background: couleur, borderRadius: rond ? 5 : 3 }} />
+        <span className="nom">{nom}</span>
+        <span className={'mt' + (vide(valeur) ? ' vide' : '')}>{vide(valeur) ? '—' : eur(num(valeur))}</span>
+        <Ico d={I.droite} size={18} color="var(--ink4)" />
+      </button>
+    );
+  }
+
+  function Section({ titre, total, cls, liste, type, couleur }) {
+    return (
+      <div className="section">
+        <div className="section-tete">
+          <h2>{titre}</h2>
+          <span className={cls}>{eur(total)}</span>
         </div>
-      )}
-
-      {/* Actions */}
-      <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
-        <button onClick={sauvegarder} disabled={saving} style={{
-          padding:"11px 24px", borderRadius:10, border:"none",
-          background: saving ? C.ink3 : C.ink, color:"#fff",
-          fontFamily:"DM Sans", fontSize:14, fontWeight:700,
-          cursor: saving ? "default" : "pointer",
-        }}>{saving ? 'Enregistrement…' : 'Enregistrer'}</button>
-        {msg && (
-          <span style={{fontSize:13,fontWeight:600,fontFamily:"DM Sans",color: msg.ok ? '#2E8B57' : '#E04848'}}>
-            {msg.ok ? '✓ ' : '✗ '}{msg.txt}
-          </span>
-        )}
-      </div>
-
-      {/* Ajout de catégorie */}
-      {!compact && (
-        <div style={{marginTop:22,paddingTop:18,borderTop:`1px solid ${C.border}`}}>
-          <div style={{fontSize:11,fontWeight:700,color:C.ink3,textTransform:"uppercase",letterSpacing:".1em",fontFamily:"DM Sans",marginBottom:10}}>
+        <div className="liste">
+          {liste.map((c, i) => (
+            Rang({ key: c.nom, nom: c.nom, valeur: vals[c.nom], couleur: couleur, premier: i === 0,
+              onClick: () => setEdit({ kind: 'cat', nom: c.nom, type: c.type }) })
+          ))}
+          {type === 'depense' && ponct.map((p, i) => (
+            <button key={p.id} className="rang" onClick={() => setEditPonct(p)} style={!liste.length && i === 0 ? { borderTop: 'none' } : null}>
+              <span className="pt" style={{ background: 'var(--dep2)' }} />
+              <span className="nom">{p.nom}</span>
+              <span className="tag-ponct">ponctuel</span>
+              <span className="mt">{eur(num(p.montant))}</span>
+              <Ico d={I.droite} size={18} color="var(--ink4)" />
+            </button>
+          ))}
+          <button className="rang ajout" onClick={() => setAjout(type)} style={liste.length || (type === 'depense' && ponct.length) ? null : { borderTop: 'none' }}>
+            <Ico d={I.plus} size={18} sw={2.2} />
             Ajouter une ligne
-          </div>
-          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-            <input
-              value={nouvelle} onChange={e=>setNouvelle(e.target.value)}
-              placeholder="Nom (ex. Mutuelle)"
-              style={{
-                flex:1, minWidth:160, padding:"9px 12px",
-                border:`1.5px solid ${C.border}`, borderRadius:10,
-                fontFamily:"DM Sans", fontSize:13, background:C.bg, outline:"none",
-              }}/>
-            <select value={typeNouv} onChange={e=>setTypeNouv(e.target.value)} style={{
-              padding:"9px 12px", border:`1.5px solid ${C.border}`, borderRadius:10,
-              fontFamily:"DM Sans", fontSize:13, fontWeight:600, background:C.bg, outline:"none", cursor:"pointer",
-            }}>
-              <option value="depense">Dépense</option>
-              <option value="revenu">Revenu</option>
-            </select>
-            <button onClick={ajouterCategorie} disabled={saving || !nouvelle.trim()} style={{
-              padding:"9px 18px", borderRadius:10, border:`1.5px solid ${C.ink}`,
-              background:"transparent", color:C.ink,
-              fontFamily:"DM Sans", fontSize:13, fontWeight:700,
-              cursor: (saving || !nouvelle.trim()) ? "default" : "pointer",
-              opacity: (saving || !nouvelle.trim()) ? .45 : 1,
-            }}>Ajouter</button>
-          </div>
-
-          {/* Lignes masquées : restauration possible */}
-          {(data.finCategories || []).filter(c => !c.actif).length > 0 && (
-            <div style={{marginTop:16}}>
-              <div style={{fontSize:11,fontWeight:700,color:C.ink3,textTransform:"uppercase",letterSpacing:".1em",fontFamily:"DM Sans",marginBottom:8}}>
-                Lignes masquées
-              </div>
-              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                {(data.finCategories || []).filter(c => !c.actif).map((c,i) => (
-                  <button key={i} onClick={()=>restaurerCategorie(c.nom)} disabled={saving}
-                    style={{
-                      display:"inline-flex", alignItems:"center", gap:6,
-                      border:`1.5px dashed ${C.border}`, background:"transparent",
-                      borderRadius:20, padding:"5px 12px", cursor: saving?"default":"pointer",
-                      fontFamily:"DM Sans", fontSize:12, fontWeight:600, color:C.ink3,
-                    }}>
-                    {c.nom}<span style={{fontSize:14,lineHeight:1}}>↩</span>
-                  </button>
-                ))}
-              </div>
-            </div>
+          </button>
+          {type === 'depense' && (
+            <button className="rang ajout" onClick={() => setEditPonct({ id: 'n' + Date.now(), nom: '', montant: '', nouveau: true })}>
+              <Ico d={I.plus} size={18} sw={2.2} />
+              Dépense ponctuelle
+            </button>
           )}
         </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="page avec-barre">
+      <div className="nav-mois">
+        <button onClick={() => changerMois(ymAjoute(mois, -1))} aria-label="Mois précédent"><Ico d={I.gauche} sw={2.2} /></button>
+        <div className="centre">
+          <h1>{moisTitre(mois)}</h1>
+          <span className={'etat ' + etatCls}>{etatTxt}</span>
+        </div>
+        <button onClick={() => changerMois(ymAjoute(mois, 1))} aria-label="Mois suivant"><Ico d={I.droite} sw={2.2} /></button>
+      </div>
+
+      {reconduit && (
+        <div className="bandeau info">
+          <Ico d={I.refresh} size={20} />
+          <span className="txt">Montants reconduits depuis <strong>{moisLong(reconduit)}</strong>. Vérifie-les puis enregistre.</span>
+          <button className="mini" onClick={repartirDeZero}>Repartir de zéro</button>
+        </div>
+      )}
+
+      <div className="carte trio" style={{ padding: '14px 16px' }}>
+        <div><div className="lib">Revenus</div><div className="val c-rev">{eur(totRev)}</div></div>
+        <div><div className="lib">Dépenses</div><div className="val c-dep">{eur(totDep)}</div></div>
+        <div><div className="lib">Solde</div><div className="val">{eurSigne(totRev - totDep)}</div></div>
+      </div>
+
+      <CarteVirement loyers={loyersFr} dep={totDep} />
+
+      {Section({ titre: 'Revenus', total: totRev, cls: 'c-rev', liste: revenus, type: 'revenu', couleur: 'var(--rev)' })}
+      {Section({ titre: 'Dépenses', total: totDep, cls: 'c-dep', liste: depenses, type: 'depense', couleur: 'var(--dep)' })}
+
+      <div className="section">
+        <div className="section-tete">
+          <h2>Comptes · fin de mois</h2>
+          <span style={{ color: 'var(--barOn)' }}>{soldesRemplis ? eur(patrimoine) : '—'}</span>
+        </div>
+        <div className="liste">
+          {COMPTES.map((c, i) => (
+            Rang({ key: c, nom: c, valeur: sold[c], couleur: 'var(--hero)', rond: true, premier: i === 0,
+              onClick: () => setEdit({ kind: 'compte', nom: c }) })
+          ))}
+        </div>
+      </div>
+
+      <div className="barre-save">
+        <div className="in">
+          <button className="bouton" onClick={enregistrer} disabled={saving || !aEnregistrer}>
+            <Ico d={saving ? I.refresh : I.check} size={18} sw={2.4} />
+            {saving ? 'Enregistrement…' : aEnregistrer ? 'Enregistrer ' + moisNom(mois) : capital(moisNom(mois)) + ' enregistré'}
+          </button>
+        </div>
+      </div>
+
+      {edit && (
+        <FeuilleSaisie
+          edit={edit}
+          mois={mois}
+          valeur={edit.kind === 'compte' ? sold[edit.nom] : vals[edit.nom]}
+          reference={reference(edit)}
+          source={source}
+          onClose={() => setEdit(null)}
+          onValider={valider}
+          onMasquer={edit.kind === 'cat' ? () => masquer(edit.nom) : null}
+        />
+      )}
+      {editPonct && (
+        <FeuillePonctuel p={editPonct} mois={mois} onClose={() => setEditPonct(null)}
+          onValider={validerPonct} onSupprimer={editPonct.nouveau ? null : () => supprimerPonct(editPonct.id)} />
+      )}
+      {ajout && <FeuilleAjout type={ajout} onClose={() => setAjout(null)} onAjouter={ajouter} />}
+    </div>
+  );
+}
+
+function FeuilleSaisie({ edit, mois, valeur, reference, source, onClose, onValider, onMasquer }) {
+  const [txt, setTxt] = useState(pourSaisie(valeur));
+  const ref = useRef(null);
+  useEffect(() => {
+    const t = setTimeout(() => { if (ref.current) { ref.current.focus(); ref.current.select(); } }, 60);
+    return () => clearTimeout(t);
+  }, []);
+  const sous = edit.kind === 'compte' ? 'Solde au ' + finDeMois(mois) + ' ' + mois.slice(0, 4)
+    : (edit.type === 'depense' ? 'Dépense' : 'Revenu') + ' · ' + moisLong(mois);
+  function ok() { onValider(txt.trim() === '' ? '' : txt.trim()); }
+  return (
+    <Feuille onClose={onClose} labelId="titre-saisie">
+      <div className="ligne-tete" style={{ alignItems: 'flex-start' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 }}>
+          <h2 id="titre-saisie">{edit.nom}</h2>
+          <span className="petit">{sous}</span>
+        </div>
+        <button className="rond" style={{ background: 'var(--surface2)', border: 'none' }} onClick={onClose} aria-label="Fermer">
+          <Ico d={I.croix} size={18} sw={2.2} />
+        </button>
+      </div>
+      <form onSubmit={(e) => { e.preventDefault(); ok(); }} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <label htmlFor="montant" style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink2)' }}>Montant</label>
+          <div className="champ">
+            <input id="montant" ref={ref} type="text" inputMode="decimal" autoComplete="off" enterKeyHint="done"
+              value={txt} onChange={(e) => setTxt(nettoyer(e.target.value))} placeholder="0,00" />
+            <span className="eur">€</span>
+          </div>
+        </div>
+        <div className="chips">
+          {reference !== null && reference !== undefined && (
+            <button type="button" onClick={() => setTxt(pourSaisie(reference))}>Comme {moisNom(source)} · {eur(reference)}</button>
+          )}
+          <button type="button" onClick={() => setTxt('0,00')}>Mettre à 0</button>
+          {txt !== '' && <button type="button" onClick={() => setTxt('')}>Effacer</button>}
+        </div>
+        <div className="deux">
+          <button type="button" className="bouton second" onClick={onClose}>Annuler</button>
+          <button type="submit" className="bouton">Valider</button>
+        </div>
+      </form>
+      {onMasquer && (
+        <>
+          <div className="sep" />
+          <button className="masquer" onClick={onMasquer}>
+            <Ico d={I.oeil} size={20} />
+            <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <span style={{ fontSize: 15, fontWeight: 700 }}>Masquer cette ligne</span>
+              <span className="petit" style={{ fontSize: 12 }}>Les montants déjà enregistrés restent dans l'historique.</span>
+            </span>
+          </button>
+        </>
+      )}
+    </Feuille>
+  );
+}
+
+function FeuillePonctuel({ p, mois, onClose, onValider, onSupprimer }) {
+  const [nom, setNom] = useState(p.nom);
+  const [txt, setTxt] = useState(pourSaisie(p.montant));
+  const refNom = useRef(null), refMt = useRef(null);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const el = p.nouveau ? refNom.current : refMt.current;
+      if (el) { el.focus(); if (!p.nouveau) el.select(); }
+    }, 60);
+    return () => clearTimeout(t);
+  }, []);
+  const ok = nom.trim() && num(txt) !== 0;
+  return (
+    <Feuille onClose={onClose} labelId="titre-ponct">
+      <div className="ligne-tete" style={{ alignItems: 'flex-start' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 }}>
+          <h2 id="titre-ponct">{p.nouveau ? 'Dépense ponctuelle' : p.nom}</h2>
+          <span className="petit">Uniquement en {moisLong(mois)} · non reconduite</span>
+        </div>
+        <button className="rond" style={{ background: 'var(--surface2)', border: 'none' }} onClick={onClose} aria-label="Fermer">
+          <Ico d={I.croix} size={18} sw={2.2} />
+        </button>
+      </div>
+      <form onSubmit={(e) => { e.preventDefault(); if (ok) onValider({ id: p.id, nom: nom.trim(), montant: txt.trim() }); }}
+        style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <label htmlFor="nom-ponct" style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink2)' }}>Libellé</label>
+          <input id="nom-ponct" ref={refNom} className="champ-texte" value={nom} onChange={(e) => setNom(e.target.value)}
+            placeholder="Ex. : Plomberie" autoComplete="off" />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <label htmlFor="mt-ponct" style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink2)' }}>Montant</label>
+          <div className="champ">
+            <input id="mt-ponct" ref={refMt} type="text" inputMode="decimal" autoComplete="off" enterKeyHint="done"
+              value={txt} onChange={(e) => setTxt(nettoyer(e.target.value))} placeholder="0,00" />
+            <span className="eur">€</span>
+          </div>
+        </div>
+        <div className="deux">
+          <button type="button" className="bouton second" onClick={onClose}>Annuler</button>
+          <button type="submit" className="bouton" disabled={!ok}>Valider</button>
+        </div>
+      </form>
+      {onSupprimer && (
+        <>
+          <div className="sep" />
+          <button className="masquer" onClick={onSupprimer}>
+            <Ico d={I.croix} size={20} />
+            <span style={{ fontSize: 15, fontWeight: 700 }}>Supprimer cette dépense</span>
+          </button>
+        </>
+      )}
+    </Feuille>
+  );
+}
+
+function FeuilleAjout({ type, onClose, onAjouter }) {
+  const [nom, setNom] = useState('');
+  const ref = useRef(null);
+  useEffect(() => { const t = setTimeout(() => ref.current && ref.current.focus(), 60); return () => clearTimeout(t); }, []);
+  return (
+    <Feuille onClose={onClose} labelId="titre-ajout">
+      <h2 id="titre-ajout">{type === 'depense' ? 'Nouvelle dépense' : 'Nouveau revenu'}</h2>
+      <form onSubmit={(e) => { e.preventDefault(); onAjouter(nom, type); }} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <label htmlFor="nom-ligne" className="petit" style={{ fontWeight: 600, color: 'var(--ink2)' }}>Nom de la ligne</label>
+        <input id="nom-ligne" ref={ref} className="champ-texte" value={nom} onChange={(e) => setNom(e.target.value)}
+          placeholder={type === 'depense' ? 'Ex. : Assurance habitation' : 'Ex. : Salaire lycée'} autoComplete="off" />
+        <div className="deux">
+          <button type="button" className="bouton second" onClick={onClose}>Annuler</button>
+          <button type="submit" className="bouton" disabled={!nom.trim()}>Ajouter</button>
+        </div>
+      </form>
+    </Feuille>
+  );
+}
+
+/* ---------- Historique ---------- */
+
+function PageHistorique({ d, onGoMois }) {
+  const [vue, setVue] = useState('mois');
+  const [filtre, setFiltre] = useState('rev');
+  const [sel, setSel] = useState(null);
+  const [selY, setSelY] = useState(null);
+
+  if (!d.moisArch.length) {
+    return (
+      <div className="page">
+        <header className="entete"><div><h1>Historique</h1></div></header>
+        <div className="carte petit">Aucun mois enregistré pour l'instant.</div>
+      </div>
+    );
+  }
+
+  // Mois continus du premier au dernier mois saisi
+  const premier = d.moisArch[0], dernier = d.moisArch[d.moisArch.length - 1];
+  const tous = [];
+  for (let m = premier; m <= dernier; m = ymAjoute(m, 1)) tous.push(m);
+
+  const catsRev = Array.from(new Set(d.arch.filter((a) => (d.typeDe[a.categorie] || 'revenu') === 'revenu' && a.montant).map((a) => a.categorie)));
+  const aDepenses = d.arch.some((a) => d.typeDe[a.categorie] === 'depense' && a.montant);
+  const filtres = [['rev', 'Tous revenus']].concat(catsRev.map((c) => [c, c]));
+  if (aDepenses) filtres.push(['dep', 'Dépenses']);
+  const f = filtres.some((x) => x[0] === filtre) ? filtre : 'rev';
+  const nomFiltre = f === 'rev' ? 'Revenus' : f === 'dep' ? 'Dépenses' : f;
+
+  const val = (m) => {
+    const p = d.parMois[m];
+    if (!p) return 0;
+    if (f === 'rev') return p.rev;
+    if (f === 'dep') return p.dep;
+    return p.cats[f] || 0;
+  };
+
+  const visibles = tous.slice(-24);
+  const iSel = sel !== null && sel < visibles.length ? sel : visibles.length - 1;
+  const max = Math.max.apply(null, tous.map(val).concat([1]));
+
+  const annees = Array.from(new Set(tous.map((m) => m.slice(0, 4))));
+  const parAn = annees.map((y) => {
+    const ms = tous.filter((m) => m.slice(0, 4) === y);
+    const saisis = ms.filter((m) => d.moisArch.indexOf(m) >= 0);
+    return { y, tot: ms.reduce((a, m) => a + val(m), 0), n: saisis.length };
+  });
+  const yCourant = selY && annees.indexOf(selY) >= 0 ? selY : annees[annees.length - 1];
+  const aSel = parAn.find((a) => a.y === yCourant);
+  const maxY = Math.max.apply(null, parAn.map((a) => a.tot).concat([1]));
+
+  const groupesAn = [];
+  visibles.forEach((m) => {
+    const y = m.slice(0, 4);
+    const g = groupesAn[groupesAn.length - 1];
+    if (g && g.y === y) g.n++; else groupesAn.push({ y, n: 1 });
+  });
+
+  const premiereDep = d.moisArch.find((m) => d.parMois[m].dep > 0);
+  const avertissement = !premiereDep
+    ? 'Aucune dépense n\'a encore été saisie : les soldes mensuels ne tiennent compte que des revenus.'
+    : premiereDep > premier
+      ? 'Avant ' + moisLong(premiereDep) + ', seuls les revenus ont été importés. Les soldes de cette période n\'incluent donc aucune dépense.'
+      : null;
+
+  return (
+    <div className="page">
+      <header className="entete"><div><h1>Historique</h1></div></header>
+
+      <div className="seg" role="group" aria-label="Période">
+        <button aria-pressed={vue === 'mois'} onClick={() => setVue('mois')}>Par mois</button>
+        <button aria-pressed={vue === 'annee'} onClick={() => setVue('annee')}>Par année</button>
+      </div>
+
+      {avertissement && (
+        <div className="bandeau warn">
+          <IcoInfo color="var(--warnInk)" />
+          <span className="txt">{avertissement}</span>
+        </div>
+      )}
+
+      <section className="carte" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <span className="sur-titre">{nomFiltre} · {vue === 'mois' ? 'par mois' : 'par année'}</span>
+          <span className="petit" style={{ color: 'var(--ink2)' }}>
+            {vue === 'mois' ? capital(moisLong(visibles[iSel])) : yCourant + (aSel.n < 12 ? ' · ' + aSel.n + ' mois saisis' : '')}
+          </span>
+          <span style={{ fontSize: 26, fontWeight: 800, letterSpacing: '-0.01em', color: 'var(--barOn)' }}>
+            {eur(vue === 'mois' ? val(visibles[iSel]) : aSel.tot)}
+          </span>
+        </div>
+
+        {vue === 'mois' ? (
+          <div data-noswipe="1" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div className="barres">
+              {visibles.map((m, i) => (
+                <button key={m} aria-pressed={i === iSel} aria-label={moisLong(m) + ', ' + eur(val(m))} onClick={() => setSel(i)}>
+                  <span style={{ height: Math.max(3, Math.round(val(m) / max * 146)) }} />
+                </button>
+              ))}
+            </div>
+            <div className="annees">
+              {groupesAn.map((g) => <span key={g.y} style={{ flex: g.n + ' 1 0' }}>{g.n >= 2 ? g.y : ''}</span>)}
+            </div>
+          </div>
+        ) : (
+          <div className="barres-an" data-noswipe="1">
+            {parAn.map((a) => (
+              <button key={a.y} aria-pressed={a.y === yCourant} aria-label={a.y + ', ' + eur(a.tot)} onClick={() => setSelY(a.y)}>
+                <span style={{ textAlign: 'center' }}>{a.y}</span>
+                <span className="b" style={{ height: Math.max(3, Math.round(a.tot / maxY * 150)) }} />
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="chips" role="group" aria-label="Filtrer">
+          {filtres.map((x) => (
+            <button key={x[0]} aria-pressed={x[0] === f} onClick={() => setFiltre(x[0])}>{x[1]}</button>
+          ))}
+        </div>
+      </section>
+
+      {vue === 'mois' ? annees.slice().reverse().map((y) => {
+        const ms = tous.filter((m) => m.slice(0, 4) === y).reverse();
+        return (
+          <div className="section" key={y}>
+            <div className="section-tete">
+              <h2>{y}</h2>
+              <span className={f === 'dep' ? 'c-dep' : 'c-rev'}>{eur(ms.reduce((a, m) => a + val(m), 0))}</span>
+            </div>
+            <div className="liste">
+              {ms.map((m) => (
+                <button className="hist-rang" key={m} onClick={() => onGoMois(m)}>
+                  <span className="l1">
+                    <span className="nom">{capital(moisNom(m))}</span>
+                    <span className="mt">{val(m) ? eur(val(m)) : '—'}</span>
+                    <Ico d={I.droite} size={16} color="var(--ink4)" />
+                  </span>
+                  <span className="jauge"><span style={{ width: Math.round(val(m) / max * 100) + '%', background: f === 'dep' ? 'var(--dep2)' : undefined }} /></span>
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+      }) : (
+        <div className="liste">
+          {parAn.slice().reverse().map((a) => (
+            <div key={a.y} style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '14px 16px', borderTop: a.y === parAn[parAn.length - 1].y ? 'none' : '1px solid var(--line2)' }}>
+              <span className="ligne-tete">
+                <span style={{ fontSize: 17, fontWeight: 800 }}>{a.y}</span>
+                <span style={{ fontSize: 17, fontWeight: 800 }} className={f === 'dep' ? 'c-dep' : 'c-rev'}>{eur(a.tot)}</span>
+              </span>
+              <span className="petit">{a.n} mois saisis · moyenne {eur(a.n ? a.tot / a.n : 0)} par mois</span>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );
 }
 
-// ── PAGE SITUATION — actif / passif du mois + patrimoine ─────────────────────
-function PageSituation({ data, onRefresh }) {
-  const [mois, setMois] = useState(moisCourantYM());
+/* ---------- Menu ---------- */
 
-  // Liste des mois proposés : 24 derniers mois
-  const options = [];
-  const d0 = new Date();
-  for (let i = 0; i < 24; i++) {
-    const d = new Date(d0.getFullYear(), d0.getMonth() - i, 1);
-    options.push(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'));
-  }
-
-  const pret = (data.finCategories || []).length > 0;
-
+function FeuilleMenu({ d, onClose, onRefresh, theme, setTheme, maj, onRestaurer, chargement }) {
+  const [ouvert, setOuvert] = useState(false);
+  const masquees = d.cats.filter((c) => !c.actif);
+  const heure = maj ? (maj.toDateString() === new Date().toDateString()
+    ? 'aujourd\'hui à ' + maj.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
+    : 'le ' + maj.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' })) : 'jamais';
   return (
-    <div style={{padding:"32px 28px",maxWidth:980,margin:"0 auto"}}>
-      <div className="fade-up" style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12,marginBottom:20}}>
-        <SectionTitle accent="#96CEB4">Situation</SectionTitle>
-        <select value={mois} onChange={e=>setMois(e.target.value)} style={{
-          padding:"10px 16px", borderRadius:10, border:`2px solid ${C.border}`,
-          background:C.white, color:C.ink, fontFamily:"DM Sans",
-          fontSize:14, fontWeight:700, cursor:"pointer", outline:"none",
-        }}>
-          {options.map(m => <option key={m} value={m}>{moisLisible(m)}</option>)}
-        </select>
+    <Feuille onClose={onClose} fond labelId="titre-menu">
+      <div className="ligne-tete" style={{ padding: '0 4px' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <h2 id="titre-menu">Comptes</h2>
+          <span className="petit">Version {APP_VERSION.slice(1)} · données mises à jour {heure}</span>
+        </div>
+        <button className="rond" onClick={onClose} aria-label="Fermer"><Ico d={I.croix} size={18} sw={2.2} /></button>
       </div>
 
-      <div className="fade-up-2" style={{background:C.white,borderRadius:20,padding:"26px 28px",boxShadow:C.shadow}}>
-        {pret
-          ? <EditeurMois data={data} mois={mois} onSaved={onRefresh}/>
-          : <div style={{fontSize:13,color:C.ink3,fontFamily:"DM Sans",lineHeight:1.6}}>
-              Les catégories ne sont pas encore initialisées.<br/>
-              Dans Google&nbsp;Sheets : menu <strong>⚙️ Finances → Initialiser</strong>, puis reviens ici et actualise.
-            </div>}
+      <div className="liste">
+        <button className="menu-rang" onClick={onRefresh} disabled={chargement}>
+          <Ico d={I.refresh} color="var(--barOn)" />
+          <span className="txt"><span className="t1">{chargement ? 'Actualisation…' : 'Actualiser les données'}</span></span>
+        </button>
+        <a className="menu-rang" href={LIENS.nominas} target="_blank" rel="noopener">
+          <IcoTableur />
+          <span className="txt"><span className="t1">Nóminas</span><span className="t2">Feuille Google Sheets</span></span>
+          <Ico d={I.externe} size={18} color="var(--ink4)" />
+        </a>
+        <a className="menu-rang" href={LIENS.impots} target="_blank" rel="noopener">
+          <IcoDoc />
+          <span className="txt"><span className="t1">Impôts</span><span className="t2">Feuille Google Sheets</span></span>
+          <Ico d={I.externe} size={18} color="var(--ink4)" />
+        </a>
       </div>
-    </div>
-  );
-}
 
-// ── PAGE ARCHIVES — historique complet, filtres, correction ──────────────────
-function PageArchives({ data, onRefresh }) {
-  const archives = data.finArchives || [];
-  const soldes   = data.finSoldes   || [];
-  const cats     = data.finCategories || [];
-  const typeDe   = {};
-  cats.forEach(c => { typeDe[c.nom] = c.type; });
-
-  const [annee, setAnnee]   = useState('toutes');
-  const [secteur, setSecteur] = useState('tous');
-  const [editMois, setEditMois] = useState(null);
-
-  // Mois présents dans les archives ou les soldes
-  const moisSet = {};
-  archives.forEach(a => { moisSet[a.mois] = true; });
-  soldes.forEach(s => { moisSet[s.mois] = true; });
-  const tousMois = Object.keys(moisSet).sort().reverse();
-
-  const annees = [];
-  tousMois.forEach(m => { const y = m.slice(0,4); if (annees.indexOf(y) === -1) annees.push(y); });
-
-  const moisFiltres = tousMois.filter(m => annee === 'toutes' || m.slice(0,4) === annee);
-
-  // Agrégats par mois
-  const lignes = moisFiltres.map(m => {
-    const duMois = archives.filter(a => a.mois === m)
-      .filter(a => secteur === 'tous' || a.categorie === secteur);
-    const rev = duMois.filter(a => typeDe[a.categorie] !== 'depense').reduce((s,a)=>s+a.montant, 0);
-    const dep = duMois.filter(a => typeDe[a.categorie] === 'depense').reduce((s,a)=>s+a.montant, 0);
-    const pat = soldes.filter(s => s.mois === m).reduce((s,x)=>s+x.montant, 0);
-    return { mois:m, rev, dep, solde: rev - dep, pat };
-  });
-
-  const totRev = lignes.reduce((a,l)=>a+l.rev, 0);
-  const totDep = lignes.reduce((a,l)=>a+l.dep, 0);
-
-  const selStyle = {
-    padding:"9px 14px", borderRadius:10, border:`2px solid ${C.border}`,
-    background:C.white, color:C.ink, fontFamily:"DM Sans",
-    fontSize:13, fontWeight:600, cursor:"pointer", outline:"none",
-  };
-
-  return (
-    <div style={{padding:"32px 28px",maxWidth:980,margin:"0 auto"}}>
-      <div className="fade-up" style={{marginBottom:18}}>
-        <SectionTitle accent="#45B7D1">Archives</SectionTitle>
-        <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
-          <select value={annee} onChange={e=>setAnnee(e.target.value)} style={selStyle}>
-            <option value="toutes">Toutes les années</option>
-            {annees.map(y => <option key={y} value={y}>{y}</option>)}
-          </select>
-          <select value={secteur} onChange={e=>setSecteur(e.target.value)} style={selStyle}>
-            <option value="tous">Tous les secteurs</option>
-            {cats.map((c,i) => <option key={i} value={c.nom}>{c.nom}</option>)}
-          </select>
+      <div className="liste">
+        <button className="menu-rang" onClick={() => setOuvert(!ouvert)} aria-expanded={ouvert} disabled={!masquees.length}>
+          <Ico d={I.oeil} color="var(--barOn)" />
+          <span className="txt">
+            <span className="t1">Lignes masquées</span>
+            <span className="t2">{masquees.length ? masquees.map((c) => c.nom).join(', ') : 'Aucune'}</span>
+          </span>
+          {masquees.length > 0 && <span style={{ transform: ouvert ? 'rotate(90deg)' : 'none', display: 'flex' }}><Ico d={I.droite} size={18} color="var(--ink4)" /></span>}
+        </button>
+        {ouvert && masquees.length > 0 && (
+          <div className="menu-sous">
+            {masquees.map((c) => (
+              <div className="it" key={c.nom}>
+                <span>{c.nom}</span>
+                <button onClick={() => onRestaurer(c.nom)}>Réafficher</button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="menu-rang" style={{ flexWrap: 'wrap', paddingTop: 12, paddingBottom: 12 }}>
+          <Ico d={I.lune} color="var(--barOn)" />
+          <span className="txt"><span className="t1">Apparence</span></span>
+          <div className="seg" role="group" aria-label="Apparence" style={{ width: '100%' }}>
+            {[['auto', 'Automatique'], ['light', 'Clair'], ['dark', 'Sombre']].map((x) => (
+              <button key={x[0]} aria-pressed={theme === x[0]} onClick={() => setTheme(x[0])}>{x[1]}</button>
+            ))}
+          </div>
         </div>
       </div>
-
-      {/* Synthèse de la sélection */}
-      <div className="fade-up" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:14,marginBottom:22}}>
-        <KpiCard label="Revenus" value={fmtM(totRev)} color="#2E8B57"/>
-        <KpiCard label="Dépenses" value={fmtM(totDep)} color="#E04848" delay="-2"/>
-        <KpiCard label="Solde cumulé" value={fmtM(totRev - totDep)} color={totRev-totDep>=0?"#45B7D1":"#E04848"} delay="-3"/>
-        <KpiCard label="Mois enregistrés" value={String(lignes.length)} color="#FECA57" delay="-4"/>
-      </div>
-
-      {/* Tableau */}
-      <div className="fade-up-2" style={{background:C.white,borderRadius:20,padding:"24px 28px",boxShadow:C.shadow}}>
-        {lignes.length === 0 ? (
-          <div style={{fontSize:13,color:C.ink3,fontFamily:"DM Sans",textAlign:"center",padding:"20px 0"}}>
-            Aucune donnée enregistrée pour cette sélection.
-          </div>
-        ) : (
-          <div style={{overflowX:"auto"}}>
-            <table style={{width:"100%",borderCollapse:"separate",borderSpacing:"0 3px",fontFamily:"DM Sans",fontSize:12}}>
-              <thead>
-                <tr>{["Mois","Revenus","Dépenses","Solde","Patrimoine",""].map(h=>(
-                  <th key={h} style={{textAlign:"left",padding:"8px 12px",fontSize:10,fontWeight:600,color:C.ink3,textTransform:"uppercase",letterSpacing:".08em",borderBottom:`2px solid ${C.border}`}}>{h}</th>
-                ))}</tr>
-              </thead>
-              <tbody>
-                {lignes.map((l,i)=>(
-                  <tr key={i} style={{background:i%2===0?"#F4F7FA":C.white}}>
-                    <td style={{padding:"10px 12px",fontWeight:600,color:C.ink}}>{moisLisible(l.mois)}</td>
-                    <td style={{padding:"10px 12px",color:"#2E8B57",fontWeight:500}}>{l.rev>0?fmtM(l.rev):"—"}</td>
-                    <td style={{padding:"10px 12px",color:"#E04848",fontWeight:500}}>{l.dep>0?fmtM(l.dep):"—"}</td>
-                    <td style={{padding:"10px 12px"}}>
-                      <span style={{background:l.solde>=0?"#2E8B5718":"#E0484818",color:l.solde>=0?"#2E8B57":"#E04848",padding:"4px 10px",borderRadius:6,fontWeight:700}}>{fmtM(l.solde)}</span>
-                    </td>
-                    <td style={{padding:"10px 12px",color:"#1F7A99",fontWeight:500}}>{l.pat>0?fmtM(l.pat):"—"}</td>
-                    <td style={{padding:"10px 12px"}}>
-                      <button onClick={()=>setEditMois(editMois===l.mois?null:l.mois)} style={{
-                        border:`1.5px solid ${C.border}`, background:"transparent",
-                        borderRadius:8, padding:"5px 12px", cursor:"pointer",
-                        fontFamily:"DM Sans", fontSize:12, fontWeight:600, color:C.ink2,
-                      }}>{editMois===l.mois ? 'Fermer' : 'Corriger'}</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {/* Éditeur inline du mois sélectionné */}
-        {editMois && (
-          <div style={{marginTop:22,paddingTop:20,borderTop:`2px solid ${C.border}`}}>
-            <div style={{fontFamily:"Playfair Display",fontSize:17,fontWeight:700,color:C.ink,marginBottom:14}}>
-              Correction — {moisLisible(editMois)}
-            </div>
-            <EditeurMois data={data} mois={editMois} onSaved={onRefresh}/>
-          </div>
-        )}
-      </div>
-    </div>
+    </Feuille>
   );
 }
 
-// ── ROOT ──────────────────────────────────────────────────────────────────────
-const TABS = [
-  {id:"accueil",label:"Tableau de bord"},
-  {id:"cours",  label:"Cours du mois"},
-  {id:"recap",  label:"Historique"},
-  {id:"analyse",label:"Analyse"},
-  {id:"situation",label:"Situation"},
-  {id:"archives", label:"Archives"},
-  {id:"liens",  label:"Liens"},
+/* ---------- Application ---------- */
+
+const ONGLETS = [
+  { id: 'accueil', label: 'Accueil' },
+  { id: 'mois', label: 'Mois' },
+  { id: 'historique', label: 'Historique' }
 ];
 
+function lireTheme() {
+  try { const t = localStorage.getItem(CLE_THEME); return t === 'light' || t === 'dark' ? t : 'auto'; } catch (e) { return 'auto'; }
+}
+
 function App() {
-  const [page, setPage]   = useState("accueil");
-  const [data, setData]   = useState(DATA_FALLBACK);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [lastUpdate, setLastUpdate] = useState(null);
+  const cache = useMemo(lireCache, []);
+  const [raw, setRaw] = useState(cache ? cache.raw : null);
+  const [maj, setMaj] = useState(cache && cache.at ? new Date(cache.at) : null);
+  const [chargement, setChargement] = useState(false);
+  const [erreur, setErreur] = useState(null);
+  const [page, setPage] = useState('accueil');
+  const [mois, setMois] = useState(ymDe(new Date()));
+  const [dirty, setDirty] = useState(false);
+  const [menu, setMenu] = useState(false);
+  const [toast, setToast] = useState(null);
+  const [theme, setThemeState] = useState(lireTheme);
+  const [aujourdhui] = useState(new Date());
+  const d = useMemo(() => analyser(raw), [raw]);
+  const toastT = useRef(null);
 
-  async function fetchData() {
-    setLoading(true); setError(null);
+  function notifier(txt, err) {
+    clearTimeout(toastT.current);
+    setToast({ txt, err: !!err });
+    toastT.current = setTimeout(() => setToast(null), err ? 4500 : 2200);
+  }
+
+  async function recharger(silencieux) {
+    setChargement(true);
     try {
-      const res = await fetch(API_URL);
-      const raw = await res.json();
-      if (raw.error) throw new Error(raw.error);
-      const parsed = parseSheetData(raw);
-      setData(parsed);
-      setLastUpdate(new Date());
-    } catch(e) {
-      setError("Impossible de charger les données : " + e.message);
+      const r = await apiGet();
+      ecrireCache(r);
+      setRaw(r);
+      setMaj(new Date());
+      setErreur(null);
+      if (!silencieux) notifier('Données à jour');
+    } catch (e) {
+      setErreur(e.message);
+      if (!silencieux || !raw) notifier('Impossible de charger les données : ' + e.message, true);
     } finally {
-      setLoading(false);
+      setChargement(false);
     }
   }
 
-  useEffect(() => { fetchData(); }, []);
+  useEffect(() => { recharger(true); }, []);
 
-  // Navigation par swipe gauche/droite
-  const touchRef = React.useRef({ x:0, y:0 });
-  function onTouchStart(e) {
-    touchRef.current = { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
+  useEffect(() => {
+    function avant(e) { if (dirty) { e.preventDefault(); e.returnValue = ''; } }
+    window.addEventListener('beforeunload', avant);
+    return () => window.removeEventListener('beforeunload', avant);
+  }, [dirty]);
+
+  useEffect(() => {
+    const el = document.documentElement;
+    el.setAttribute('data-theme', theme);
+    try { if (theme === 'auto') localStorage.removeItem(CLE_THEME); else localStorage.setItem(CLE_THEME, theme); } catch (e) { /* rien */ }
+    const meta = document.querySelector('meta[name="theme-color"]');
+    const sombre = theme === 'dark' || (theme === 'auto' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    if (meta) meta.setAttribute('content', sombre ? '#111317' : '#F3F1EC');
+  }, [theme]);
+
+  function quitterSaisie() {
+    if (!dirty) return true;
+    if (!window.confirm('Des montants saisis n\'ont pas été enregistrés.\n\nLes abandonner ?')) return false;
+    setDirty(false);
+    return true;
   }
-  function onTouchEnd(e) {
-    const dx = e.changedTouches[0].clientX - touchRef.current.x;
-    const dy = e.changedTouches[0].clientY - touchRef.current.y;
-    // Geste horizontal franc (et pas un scroll vertical)
-    if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5) {
-      const idx = TABS.findIndex(t => t.id === page);
-      if (dx < 0 && idx < TABS.length - 1) setPage(TABS[idx + 1].id); // swipe gauche → page suivante
-      if (dx > 0 && idx > 0)               setPage(TABS[idx - 1].id); // swipe droite → page précédente
+  function allerVers(id) {
+    if (id === page) return;
+    if (page === 'mois' && !quitterSaisie()) return;
+    setPage(id);
+    window.scrollTo(0, 0);
+  }
+  function ouvrirMois(m) {
+    if (page === 'mois' && m !== mois && !quitterSaisie()) return;
+    setMois(m);
+    setPage('mois');
+    window.scrollTo(0, 0);
+  }
+  function changerMois(m) {
+    if (!quitterSaisie()) return;
+    setMois(m);
+    window.scrollTo(0, 0);
+  }
+
+  async function restaurer(nom) {
+    try {
+      await apiPost('saveCategories', { categories: d.cats.map((c) => (c.nom === nom ? Object.assign({}, c, { actif: true }) : c)) });
+      notifier('« ' + nom + ' » réaffichée');
+      await recharger(true);
+    } catch (e) {
+      notifier('Échec : ' + e.message, true);
     }
   }
+
+  // Balayage horizontal entre onglets
+  const touche = useRef(null);
+  function debut(e) {
+    if (menu || document.querySelector('.feuille')) { touche.current = null; return; }
+    if (e.target.closest && e.target.closest('[data-noswipe]')) { touche.current = null; return; }
+    const t = e.touches[0];
+    touche.current = { x: t.clientX, y: t.clientY };
+  }
+  function fin(e) {
+    if (!touche.current) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - touche.current.x, dy = t.clientY - touche.current.y;
+    touche.current = null;
+    if (Math.abs(dx) < 70 || Math.abs(dy) > 50) return;
+    const i = ONGLETS.findIndex((o) => o.id === page);
+    const j = dx < 0 ? i + 1 : i - 1;
+    if (j >= 0 && j < ONGLETS.length) allerVers(ONGLETS[j].id);
+  }
+
+  if (!raw) {
+    return (
+      <div id="loading">
+        {erreur ? (
+          <>
+            <div>Impossible de charger les données.</div>
+            <div className="err">{erreur}</div>
+            <button className="bouton" style={{ marginTop: 20, maxWidth: 240 }} onClick={() => recharger(false)}>Réessayer</button>
+          </>
+        ) : (
+          <><div className="spin" /><div>Chargement des comptes…</div></>
+        )}
+      </div>
+    );
+  }
+
+  const horsLigne = erreur && maj ? 'Hors ligne : données du ' + maj.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' }) + '.' : null;
 
   return (
-    <div
-      style={{minHeight:"100vh",background:C.bg,fontFamily:"DM Sans, sans-serif",overscrollBehaviorY:"contain"}}
-      onTouchStart={onTouchStart}
-      onTouchEnd={onTouchEnd}
-    >
-      <style>{globalCSS}</style>
+    <div className="app" onTouchStart={debut} onTouchEnd={fin}>
+      <main>
+        {page === 'accueil' && (
+          <PageAccueil d={d} aujourdhui={aujourdhui} horsLigne={horsLigne} onMenu={() => setMenu(true)}
+            onGoMois={ouvrirMois} onGoHist={() => allerVers('historique')} />
+        )}
+        {page === 'mois' && (
+          <PageMois d={d} mois={mois} changerMois={changerMois} dirty={dirty} setDirty={setDirty}
+            recharger={recharger} notifier={notifier} />
+        )}
+        {page === 'historique' && <PageHistorique d={d} onGoMois={ouvrirMois} />}
+      </main>
 
-      {/* Navigation responsive 2 lignes */}
-      <nav style={{background:C.white,borderBottom:`1px solid ${C.border}`,position:"sticky",top:0,zIndex:20,boxShadow:"0 1px 12px rgba(0,0,0,0.05)"}}>
-        {/* Ligne 1 : logo + date + refresh */}
-        <div style={{maxWidth:980,margin:"0 auto",padding:"0 16px",display:"flex",alignItems:"center",justifyContent:"space-between",height:46,borderBottom:`1px solid ${C.border}`}}>
-          <div style={{display:"flex",alignItems:"center",gap:9}}>
-            <div style={{width:28,height:28,borderRadius:8,background:"linear-gradient(135deg,#1A1A2E,#2d2d5e)",display:"flex",alignItems:"center",justifyContent:"center"}}>
-              <svg width="14" height="14" viewBox="0 0 28 28" fill="none">
-                <rect x="4" y="4" width="9" height="9" rx="2" fill="#FECA57"/>
-                <rect x="15" y="4" width="9" height="9" rx="2" fill="#FF6B6B" opacity=".7"/>
-                <rect x="4" y="15" width="9" height="9" rx="2" fill="#4ECDC4" opacity=".7"/>
-                <rect x="15" y="15" width="9" height="9" rx="2" fill="#45B7D1"/>
-              </svg>
-            </div>
-            <span style={{fontFamily:"Playfair Display",fontWeight:700,fontSize:14,color:C.ink}}>Suivi cours <span style={{fontSize:9,color:C.ink3,fontFamily:"DM Sans"}}>{APP_VERSION}</span></span>
-          </div>
-          <div style={{display:"flex",alignItems:"center",gap:8}}>
-            {loading && <div style={{width:14,height:14,border:`2px solid #E8E8F0`,borderTopColor:C.ink,borderRadius:"50%",animation:"spin .7s linear infinite"}}/>}
-            {!loading && lastUpdate && <span style={{fontSize:9,color:C.ink3}}>{lastUpdate.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})}</span>}
-            <button onClick={fetchData} disabled={loading} style={{background:"#1A1A2E",color:"white",borderRadius:20,padding:"4px 12px",fontSize:10,fontFamily:"DM Sans",fontWeight:500,letterSpacing:".04em",border:"none",cursor:"pointer"}}>
-              {data.month !== "—" && data.month !== "Chargement…" ? data.month : "↻"}
+      <nav className="onglets" aria-label="Navigation principale">
+        <div className="in">
+          {ONGLETS.map((o) => (
+            <button key={o.id} aria-current={page === o.id ? 'page' : undefined} onClick={() => (o.id === 'mois' && page !== 'mois' ? ouvrirMois(ymDe(aujourdhui)) : allerVers(o.id))}>
+              {o.id === 'accueil' && <Ico d={I.maison} size={24} />}
+              {o.id === 'mois' && <IcoCal />}
+              {o.id === 'historique' && <Ico d={I.histo} size={24} />}
+              {o.label}
             </button>
-          </div>
-        </div>
-        {/* Ligne 2 : onglets flex-wrap */}
-        <div style={{maxWidth:980,margin:"0 auto",display:"flex",flexWrap:"wrap"}}>
-          {TABS.map(t=>(
-            <button key={t.id} className={`nav-tab${page===t.id?" active":""}`} onClick={()=>setPage(t.id)} style={{
-              flex:"1 1 auto",minWidth:0,padding:"0 8px",border:"none",background:"transparent",
-              fontFamily:"DM Sans",fontSize:12,fontWeight:page===t.id?600:400,
-              color:page===t.id?C.ink:C.ink3,cursor:"pointer",
-              borderBottom:`3px solid ${page===t.id?C.ink:"transparent"}`,
-              height:40,transition:"all .2s",whiteSpace:"nowrap",textAlign:"center",
-            }}>{t.label}</button>
           ))}
         </div>
       </nav>
 
-      {/* Erreur */}
-      {error && (
-        <div style={{background:"#FFF0F0",border:"1px solid #FFD0D0",borderRadius:10,margin:"16px",padding:"12px 16px",fontSize:12,color:"#c0392b",fontFamily:"DM Sans",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <span>{error}</span>
-          <button onClick={fetchData} style={{background:"#c0392b",color:"white",border:"none",borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:11}}>Réessayer</button>
-        </div>
+      {menu && (
+        <FeuilleMenu d={d} onClose={() => setMenu(false)} onRefresh={() => recharger(false)} theme={theme}
+          setTheme={setThemeState} maj={maj} onRestaurer={restaurer} chargement={chargement} />
       )}
 
-      {/* Écran de chargement initial */}
-      {loading && data.month === "—" && (
-        <div style={{textAlign:"center",padding:"80px 0",color:C.ink3,fontFamily:"DM Sans"}}>
-          <div style={{width:32,height:32,border:`3px solid ${C.border}`,borderTopColor:C.ink,borderRadius:"50%",animation:"spin .7s linear infinite",margin:"0 auto 16px"}}/>
-          <div style={{fontSize:14}}>Chargement depuis Google Sheets…</div>
-        </div>
-      )}
-
-      {/* Pages */}
-      {(!loading || data.month !== "—") && page==="accueil" && <PageAccueil data={data} onRefresh={fetchData}/>}
-      {(!loading || data.month !== "—") && page==="cours"   && <PageCours   data={data}/>}
-      {(!loading || data.month !== "—") && page==="recap"   && <PageRecap   data={data}/>}
-      {(!loading || data.month !== "—") && page==="analyse" && <PageAnalyse data={data}/>}
-      {(!loading || data.month !== "—") && page==="situation" && <PageSituation data={data} onRefresh={fetchData}/>}
-      {(!loading || data.month !== "—") && page==="archives"  && <PageArchives  data={data} onRefresh={fetchData}/>}
-      {page==="liens" && <PageLiens/>}
+      {toast && <div className={'toast' + (toast.err ? ' err' : '')} role="status">{toast.txt}</div>}
     </div>
   );
 }
 
-
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
