@@ -3,7 +3,7 @@ const CACHE = 'comptes-v6.2';
 self.addEventListener('install', e => self.skipWaiting());
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys()
-    .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+    .then(keys => Promise.all(keys.filter(k => k.startsWith('comptes-') && k !== CACHE).map(k => caches.delete(k))))
     .then(() => self.clients.claim()));
 });
 self.addEventListener('fetch', e => {
@@ -17,3 +17,4 @@ self.addEventListener('fetch', e => {
     }).catch(() => caches.match(e.request, { ignoreSearch: true }))
   );
 });
+// Ne supprime que ses propres caches : toutes les applis partagent chrissorbadere.github.io.
