@@ -1,7 +1,7 @@
 // Comptes — v6.0 (source JSX, compilée en app.js)
 const { useState, useEffect, useRef, useMemo } = React;
 
-const APP_VERSION = 'v6.2';
+const APP_VERSION = 'v6.3';
 const API_URL = 'https://script.google.com/macros/s/AKfycbxyKJD9etJlzioM09crYIGHXqxNGZXq0-jadNDz3YMGMYAoZfeZ4dNmNsdne4vilEtUHw/exec';
 const COMPTES = ['Compte courant', 'Épargne France', 'Épargne Espagne'];
 const LIENS = {
