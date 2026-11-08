@@ -1,0 +1,14 @@
+{
+  "name": "comptes",
+  "version": "6.3.0",
+  "private": true,
+  "description": "Comptes — APK Android (Capacitor, PWA distante)",
+  "scripts": {},
+  "dependencies": {
+    "@capacitor/android": "^7.6.10",
+    "@capacitor/core": "^7.6.10"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.6.10"
+  }
+}

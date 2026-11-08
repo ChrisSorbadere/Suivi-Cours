@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Comptes — hors ligne</title>
+<style>
+  :root { --bg:#F3F1EC; --ink:#17181C; --ink3:#62666F; --btn:#1E3A5F; --btnInk:#fff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111317; --ink:#F2F2F0; --ink3:#9A9EA8; --btn:#9CC3F0; --btnInk:#0F1A28; } }
+  body { margin:0; min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px;
+         background:var(--bg); color:var(--ink); font-family:system-ui,sans-serif; text-align:center; padding:0 24px; }
+  h1 { margin:0; font-size:22px; } p { margin:0; color:var(--ink3); font-size:15px; line-height:1.5; max-width:300px; }
+  button { margin-top:8px; height:48px; padding:0 28px; border:none; border-radius:14px; background:var(--btn); color:var(--btnInk); font-size:16px; font-weight:700; }
+</style>
+</head>
+<body>
+  <h1>Pas de connexion</h1>
+  <p>Comptes a besoin d'Internet pour charger tes données. Vérifie ta connexion, puis réessaie.</p>
+  <button onclick="location.href='https://chrissorbadere.github.io/suivi-cours/'">Réessayer</button>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "appId": "io.github.chrissorbadere.comptes",
+  "appName": "Comptes",
+  "webDir": "app-shell",
+  "server": {
+    "url": "https://chrissorbadere.github.io/suivi-cours/",
+    "errorPath": "offline.html",
+    "androidScheme": "https"
+  },
+  "android": { "backgroundColor": "#F3F1EC" }
+}
