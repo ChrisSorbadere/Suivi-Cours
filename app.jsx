@@ -1,7 +1,7 @@
 // Comptes — v6.0 (source JSX, compilée en app.js)
 const { useState, useEffect, useRef, useMemo } = React;
 
-const APP_VERSION = 'v6.3';
+const APP_VERSION = 'v6.4';
 const API_URL = 'https://script.google.com/macros/s/AKfycbxyKJD9etJlzioM09crYIGHXqxNGZXq0-jadNDz3YMGMYAoZfeZ4dNmNsdne4vilEtUHw/exec';
 const COMPTES = ['Compte courant', 'Épargne France', 'Épargne Espagne'];
 const LIENS = {
@@ -231,96 +231,79 @@ function Feuille({ onClose, fond, children, labelId }) {
   );
 }
 
-/* ---------- Accueil ---------- */
+/* ---------- Accueil (tableau de bord) ---------- */
 
-function Repartition({ cats, pal }) {
-  const total = cats.reduce((a, c) => a + c.v, 0);
-  if (total <= 0) return null;
+function pct(v, dec) {
+  return v.toLocaleString('fr-FR', { minimumFractionDigits: dec || 0, maximumFractionDigits: dec || 0 }) + ' %';
+}
+
+function Ecart({ actuel, avant, inverse }) {
+  // inverse : une hausse est défavorable (dépenses)
+  if (!avant) return <span className="ecart neutre">pas de comparaison</span>;
+  const diff = actuel - avant;
+  if (Math.abs(diff) < 0.005) return <span className="ecart neutre">= identique</span>;
+  const bon = inverse ? diff < 0 : diff > 0;
   return (
-    <>
-      <div className="pile" role="img" aria-label={cats.map((c) => libelle(c.nom) + ' ' + eur(c.v)).join(', ')}>
-        {cats.map((c, i) => <span key={c.nom} style={{ flexGrow: c.v, background: pal[i % pal.length] }} />)}
-      </div>
-      <div className="legende">
-        {cats.map((c, i) => (
-          <div className="it" key={c.nom}>
-            <span className="pt" style={{ background: pal[i % pal.length] }} />
-            <span className="nom">{libelle(c.nom)}</span>
-            <span className="mt">{eur(c.v)}</span>
-            <span className="pc">{(c.v / total * 100).toLocaleString('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} %</span>
-          </div>
-        ))}
-      </div>
-    </>
+    <span className={'ecart ' + (bon ? 'bon' : 'mauvais')}>
+      {diff > 0 ? '▲' : '▼'} {eurSigne(diff)} ({diff > 0 ? '+' : '−'}{pct(Math.abs(diff) / avant * 100, Math.abs(diff) / avant < 0.1 ? 1 : 0)})
+    </span>
   );
 }
 
-function CarteMois({ d, m, onVoir, onModifier }) {
-  const f = d.parMois[m] || { rev: 0, dep: 0, cats: {} };
-  const detail = (type) => Object.keys(f.cats)
-    .filter((c) => (d.typeDe[c] || 'revenu') === type && f.cats[c] > 0)
-    .map((c) => ({ nom: c, v: f.cats[c] }))
-    .sort((a, b) => b.v - a.v);
-  const rev = detail('revenu');
-  const dep = detail('depense');
+function Anneau({ taux }) {
+  const R = 20, C = 2 * Math.PI * R;
+  const t = Math.max(0, Math.min(1, taux));
   return (
-    <section className="carte" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <div className="ligne-tete">
-        <h2>{moisTitre(m)}</h2>
-        <button className="lien" onClick={onModifier}>Modifier</button>
-      </div>
-      <div className="trio">
-        <div><div className="lib">Revenus</div><div className="val c-rev">{eur(f.rev)}</div></div>
-        <div><div className="lib">Dépenses</div><div className="val c-dep">{f.dep ? eur(f.dep) : '—'}</div></div>
-        <div><div className="lib">Solde</div><div className="val">{eurSigne(f.rev - f.dep)}</div></div>
-      </div>
-      {!f.dep && <div className="petit">Dépenses non saisies pour ce mois.</div>}
-      <CarteVirement compact
-        loyers={Object.keys(f.cats).filter(estLoyersFrance).reduce((a, c) => a + f.cats[c], 0)}
-        dep={f.dep} />
-      {rev.length > 0 && <Repartition cats={rev} pal={PAL_REV} />}
-      {dep.length > 0 && <Repartition cats={dep} pal={PAL_DEP} />}
-      <div><button className="lien" onClick={onVoir}>Voir l'historique <Ico d={I.droite} size={16} /></button></div>
-    </section>
+    <svg width="52" height="52" viewBox="0 0 52 52" aria-hidden="true" style={{ flexShrink: 0 }}>
+      <circle cx="26" cy="26" r={R} fill="none" stroke="var(--track)" strokeWidth="6" />
+      <circle cx="26" cy="26" r={R} fill="none" stroke="var(--ok)" strokeWidth="6" strokeLinecap="round"
+        strokeDasharray={(t * C).toFixed(1) + ' ' + C.toFixed(1)} transform="rotate(-90 26 26)" />
+    </svg>
   );
 }
 
-function Sparkline({ d, fin }) {
-  const mois = [];
-  for (let i = 11; i >= 0; i--) mois.push(ymAjoute(fin, -i));
-  const vals = mois.map((m) => (d.parMois[m] ? d.parMois[m].rev : 0));
-  const avecDonnees = mois.filter((m) => d.parMois[m] && d.parMois[m].rev > 0);
-  if (avecDonnees.length < 2) return null;
-  const W = 320, H = 90, P = 6;
-  const max = Math.max.apply(null, vals.concat([1]));
-  const pts = vals.map((v, i) => [P + i * (W - 2 * P) / 11, H - P - v / max * (H - 2 * P)]);
+function CourbePatrimoine({ d, total }) {
+  const mois = d.moisSoldes.slice(-12);
+  if (mois.length < 2) return null;
+  const vals = mois.map(total);
+  const W = 320, H = 56, P = 5;
+  const min = Math.min.apply(null, vals), max = Math.max.apply(null, vals);
+  const amp = max - min || 1;
+  const pts = vals.map((v, i) => [P + i * (W - 2 * P) / (vals.length - 1), H - P - (v - min) / amp * (H - 2 * P)]);
   const line = pts.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
-  const area = P + ',' + (H - P) + ' ' + line + ' ' + (W - P) + ',' + (H - P);
-  const moyenne = avecDonnees.reduce((a, m) => a + d.parMois[m].rev, 0) / avecDonnees.length;
-  let iMax = 0, iMin = -1;
-  vals.forEach((v, i) => {
-    if (v > vals[iMax]) iMax = i;
-    if (v > 0 && (iMin < 0 || v < vals[iMin])) iMin = i;
-  });
   const dernier = pts[pts.length - 1];
   return (
-    <section className="carte" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        <h2>Revenus sur 12 mois</h2>
-        <span className="petit">De {moisLong(mois[0])} à {moisLong(fin)}</span>
-      </div>
-      <svg viewBox={'0 0 ' + W + ' ' + H} width="100%" height="90" preserveAspectRatio="none" role="img"
-        aria-label={'Revenus mensuels de ' + moisLong(mois[0]) + ' à ' + moisLong(fin)}>
-        <polygon points={area} fill="var(--sparkFill)" />
-        <polyline points={line} fill="none" stroke="var(--spark)" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
-        <circle cx={dernier[0]} cy={dernier[1]} r="4" fill="var(--spark)" />
+    <div className="courbe-pat">
+      <svg viewBox={'0 0 ' + W + ' ' + H} width="100%" height="56" preserveAspectRatio="none" role="img"
+        aria-label={'Évolution du patrimoine de ' + moisLong(mois[0]) + ' à ' + moisLong(mois[mois.length - 1])}>
+        <polygon points={P + ',' + H + ' ' + line + ' ' + (W - P) + ',' + H} fill="rgba(255,255,255,0.10)" />
+        <polyline points={line} fill="none" stroke="#FFFFFF" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+        <circle cx={dernier[0]} cy={dernier[1]} r="4" fill="#FFFFFF" />
       </svg>
-      <div className="stats3">
-        <div><div className="lib">Moyenne</div><div className="val">{eur(moyenne)}</div></div>
-        <div><div className="lib">Plus haut · {moisCourt(mois[iMax])}</div><div className="val">{eur(vals[iMax])}</div></div>
-        <div><div className="lib">Plus bas · {iMin >= 0 ? moisCourt(mois[iMin]) : '—'}</div><div className="val">{iMin >= 0 ? eur(vals[iMin]) : '—'}</div></div>
+      <div className="axes"><span>{moisCourt(mois[0])} {mois[0].slice(2, 4)}</span><span>{moisCourt(mois[mois.length - 1])} {mois[mois.length - 1].slice(2, 4)}</span></div>
+    </div>
+  );
+}
+
+function Comparaison({ titre, actuel, avant, mActuel, mAvant, max, couleur, inverse }) {
+  const larg = (v) => Math.max(v > 0 ? 2 : 0, Math.round(v / max * 100)) + '%';
+  return (
+    <div className="cmp">
+      <div className="ligne-tete">
+        <span className="cmp-titre">{titre}</span>
+        <Ecart actuel={actuel} avant={avant} inverse={inverse} />
       </div>
-    </section>
+      <div className="cmp-l">
+        <span className="cmp-m">{capital(moisCourt(mActuel))}</span>
+        <span className="cmp-b"><span style={{ width: larg(actuel), background: couleur }} /></span>
+        <span className="cmp-v">{eur(actuel)}</span>
+      </div>
+      <div className="cmp-l">
+        <span className="cmp-m">{capital(moisCourt(mAvant))}</span>
+        <span className="cmp-b"><span style={{ width: larg(avant), background: couleur, opacity: 0.4 }} /></span>
+        <span className="cmp-v doux">{avant ? eur(avant) : '—'}</span>
+      </div>
+    </div>
   );
 }
 
@@ -328,11 +311,31 @@ function PageAccueil({ d, aujourdhui, onMenu, onGoMois, onGoHist, horsLigne }) {
   const courant = ymDe(aujourdhui);
   const dateTxt = JOURS[aujourdhui.getDay()] + ' ' + aujourdhui.getDate() + ' ' + MOIS_L[aujourdhui.getMonth()];
   const mSoldes = d.moisSoldes.length ? d.moisSoldes[d.moisSoldes.length - 1] : null;
-  const mPrec = d.moisSoldes.length > 1 ? d.moisSoldes[d.moisSoldes.length - 2] : null;
-  const total = (m) => COMPTES.concat(Object.keys((d.parMois[m] || {}).soldes || {}).filter((c) => COMPTES.indexOf(c) < 0))
-    .reduce((a, c) => a + ((d.parMois[m].soldes || {})[c] || 0), 0);
+  const mPrecS = d.moisSoldes.length > 1 ? d.moisSoldes[d.moisSoldes.length - 2] : null;
+  const total = (m) => Object.keys((d.parMois[m] || {}).soldes || {}).reduce((a, c) => a + d.parMois[m].soldes[c], 0);
   const courantSaisi = d.moisArch.indexOf(courant) >= 0;
-  const dernierArch = d.moisArch.filter((m) => m <= courant).pop() || null;
+  const passes = d.moisArch.filter((m) => m <= courant);
+  const M = passes.length ? passes[passes.length - 1] : null;
+  const P = passes.length > 1 ? passes[passes.length - 2] : null;
+  const f = M ? d.parMois[M] : null;
+  const fp = P ? d.parMois[P] : null;
+
+  const loyers = f ? Object.keys(f.cats).filter(estLoyersFrance).reduce((a, c) => a + f.cats[c], 0) : 0;
+  const topDep = f ? Object.keys(f.cats)
+    .filter((c) => (d.typeDe[c] || 'revenu') === 'depense' && f.cats[c] > 0)
+    .map((c) => ({ nom: c, v: f.cats[c] }))
+    .sort((a, b) => b.v - a.v) : [];
+  const top5 = topDep.slice(0, 5);
+  const autres = topDep.slice(5).reduce((a, c) => a + c.v, 0);
+  const maxTop = top5.length ? top5[0].v : 1;
+  const taux = f && f.rev > 0 && f.dep > 0 ? (f.rev - f.dep) / f.rev : null;
+
+  const an = M ? M.slice(0, 4) : null;
+  const moisAn = an ? d.moisArch.filter((m) => m.slice(0, 4) === an && m <= courant) : [];
+  const cumRev = moisAn.reduce((a, m) => a + d.parMois[m].rev, 0);
+  const cumDep = moisAn.reduce((a, m) => a + d.parMois[m].dep, 0);
+  const meilleur = moisAn.reduce((b, m) => (!b || d.parMois[m].rev > d.parMois[b].rev ? m : b), null);
+  const maxCmp = f ? Math.max(f.rev, f.dep, fp ? fp.rev : 0, fp ? fp.dep : 0, 1) : 1;
 
   return (
     <div className="page">
@@ -346,6 +349,16 @@ function PageAccueil({ d, aujourdhui, onMenu, onGoMois, onGoHist, horsLigne }) {
 
       {horsLigne && <div className="hors-ligne">{horsLigne}</div>}
 
+      {!courantSaisi && (
+        <section className="rappel">
+          <div className="txt">
+            <strong>{moisTitre(courant)} à saisir</strong>
+            <span>{dernierAvant(d, courant) ? 'Montants de ' + moisNom(dernierAvant(d, courant)) + ' repris, à vérifier.' : 'Revenus, dépenses et soldes.'}</span>
+          </div>
+          <button onClick={() => onGoMois(courant)}>Saisir</button>
+        </section>
+      )}
+
       <section className="hero" aria-label="Patrimoine">
         <div className="ligne-tete">
           <span className="lib">Patrimoine total</span>
@@ -354,7 +367,8 @@ function PageAccueil({ d, aujourdhui, onMenu, onGoMois, onGoHist, horsLigne }) {
         {mSoldes ? (
           <>
             <div className="total">{eur(total(mSoldes))}</div>
-            {mPrec && <div className="varia">{eurSigne(total(mSoldes) - total(mPrec))} depuis fin {moisNom(mPrec)}</div>}
+            {mPrecS && <div className="varia">{eurSigne(total(mSoldes) - total(mPrecS))} depuis fin {moisNom(mPrecS)}</div>}
+            <CourbePatrimoine d={d} total={total} />
             <div className="comptes">
               {COMPTES.map((c) => (
                 <div className="compte" key={c}>
@@ -369,26 +383,84 @@ function PageAccueil({ d, aujourdhui, onMenu, onGoMois, onGoHist, horsLigne }) {
         )}
       </section>
 
-      {!courantSaisi && (
-        <section className="carte" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div className="ligne-tete">
-            <h2>{moisTitre(courant)}</h2>
-            <span className="chip-etat attente">Pas encore saisi</span>
+      {f && (
+        <>
+          <div className="section-tete" style={{ marginTop: 4 }}>
+            <h2>{moisTitre(M)}</h2>
+            <button className="lien" style={{ minHeight: 0 }} onClick={() => onGoMois(M)}>Modifier</button>
           </div>
-          <div className="petit">
-            {dernierAvant(d, courant)
-              ? 'Les montants de ' + moisNom(dernierAvant(d, courant)) + ' seront repris : il te suffira de corriger ce qui change.'
-              : 'Saisis tes revenus, tes dépenses et le solde de tes comptes.'}
+
+          <div className="tuiles">
+            <div className="tuile">
+              <span className="lib">Revenus</span>
+              <span className="val c-rev">{eur(f.rev)}</span>
+            </div>
+            <div className="tuile">
+              <span className="lib">Dépenses</span>
+              <span className="val c-dep">{f.dep ? eur(f.dep) : '—'}</span>
+              {!f.dep && <span className="sous">non saisies</span>}
+            </div>
+            <div className="tuile">
+              <span className="lib">Solde du mois</span>
+              <span className="val">{eurSigne(f.rev - f.dep)}</span>
+              <span className="sous">revenus − dépenses</span>
+            </div>
+            <div className="tuile rang-anneau">
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                <span className="lib">Taux d'épargne</span>
+                <span className="val">{taux === null ? '—' : pct(Math.round(taux * 100))}</span>
+                <span className="sous">{taux === null ? 'dépenses à saisir' : 'des revenus gardés'}</span>
+              </div>
+              {taux !== null && <Anneau taux={taux} />}
+            </div>
           </div>
-          <button className="bouton" onClick={() => onGoMois(courant)}>Saisir {moisNom(courant)}</button>
-        </section>
-      )}
 
-      {dernierArch && (
-        <CarteMois d={d} m={dernierArch} onVoir={onGoHist} onModifier={() => onGoMois(dernierArch)} />
-      )}
+          <CarteVirement loyers={loyers} dep={f.dep} />
 
-      {dernierArch && <Sparkline d={d} fin={dernierArch} />}
+          {fp && (
+            <section className="carte bloc">
+              <h2>{capital(moisNom(M))} face à {moisNom(P)}</h2>
+              <Comparaison titre="Revenus" actuel={f.rev} avant={fp.rev} mActuel={M} mAvant={P} max={maxCmp} couleur="var(--rev)" />
+              <Comparaison titre="Dépenses" actuel={f.dep} avant={fp.dep} mActuel={M} mAvant={P} max={maxCmp} couleur="var(--dep)" inverse />
+            </section>
+          )}
+
+          {top5.length > 0 && (
+            <section className="carte bloc">
+              <div className="ligne-tete">
+                <h2>Principales dépenses</h2>
+                <span className="petit">{capital(moisNom(M))}</span>
+              </div>
+              <div className="top">
+                {top5.map((c) => (
+                  <div className="top-l" key={c.nom}>
+                    <div className="ligne-tete">
+                      <span className="top-n">{estPonctuel(c.nom) ? c.nom.slice(PREFIXE_PONCT.length) : c.nom}{estPonctuel(c.nom) && <span className="tag-ponct" style={{ marginLeft: 8 }}>ponctuel</span>}</span>
+                      <span className="top-v">{eur(c.v)}</span>
+                    </div>
+                    <span className="top-b"><span style={{ width: Math.max(2, Math.round(c.v / maxTop * 100)) + '%' }} /></span>
+                  </div>
+                ))}
+                {autres > 0 && <div className="petit">Autres lignes : {eur(autres)}</div>}
+              </div>
+            </section>
+          )}
+
+          <section className="carte bloc">
+            <div className="ligne-tete">
+              <h2>Année {an}</h2>
+              <span className="petit">{moisAn.length} mois saisi{moisAn.length > 1 ? 's' : ''}</span>
+            </div>
+            <div className="grille2">
+              <div><div className="lib">Revenus cumulés</div><div className="val c-rev">{eur(cumRev)}</div></div>
+              <div><div className="lib">Dépenses cumulées</div><div className="val c-dep">{cumDep ? eur(cumDep) : '—'}</div></div>
+              <div><div className="lib">Revenu mensuel moyen</div><div className="val">{eur(moisAn.length ? cumRev / moisAn.length : 0)}</div></div>
+              <div><div className="lib">Meilleur mois</div><div className="val">{meilleur ? capital(moisNom(meilleur)) : '—'}</div><div className="sous">{meilleur ? eur(d.parMois[meilleur].rev) : ''}</div></div>
+            </div>
+            <div><button className="lien" onClick={onGoHist}>Voir l'historique <Ico d={I.droite} size={16} /></button></div>
+          </section>
+        </>
+      )}
     </div>
   );
 }
